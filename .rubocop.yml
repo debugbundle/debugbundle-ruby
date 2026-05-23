@@ -1,0 +1,44 @@
+AllCops:
+  NewCops: enable
+  SuggestExtensions: false
+  TargetRubyVersion: 3.1
+  Exclude:
+    - gemfiles/vendor/**/*
+    - vendor/**/*
+    - coverage/**/*
+
+Layout/LineLength:
+  Max: 120
+
+Metrics/BlockLength:
+  Exclude:
+    - spec/**/*
+Metrics/AbcSize:
+  Max: 60
+
+Metrics/ClassLength:
+  Max: 600
+
+Metrics/CyclomaticComplexity:
+  Max: 20
+
+Metrics/MethodLength:
+  Max: 50
+
+Metrics/ModuleLength:
+  Max: 250
+
+Metrics/ParameterLists:
+  Max: 20
+
+Metrics/PerceivedComplexity:
+  Max: 20
+
+Naming/PredicateMethod:
+  Enabled: false
+
+Style/Documentation:
+  Enabled: false
+
+Style/MultilineBlockChain:
+  Enabled: false

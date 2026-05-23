@@ -1,0 +1,174 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable gem version to publish (for example 0.1.0)
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Resolve release version
+        id: release_version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ -z "$version" ]]; then
+            echo "missing_version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check published gem state
+        id: published_state
+        run: |
+          ruby <<'RUBY'
+          require 'json'
+          require 'net/http'
+          require 'uri'
+
+          release_version = ENV.fetch('RELEASE_VERSION')
+          uri = URI('https://rubygems.org/api/v1/versions/debugbundle.json')
+          response = Net::HTTP.get_response(uri)
+
+          state = case response
+                  when Net::HTTPOK
+                    versions = JSON.parse(response.body)
+                    versions.any? { |entry| entry['number'] == release_version } ? 'all' : 'none'
+                  when Net::HTTPNotFound
+                    'none'
+                  else
+                    raise "unexpected_rubygems_response:#{response.code}"
+                  end
+
+          File.open(ENV.fetch('GITHUB_OUTPUT'), 'a', encoding: 'utf-8') do |handle|
+            handle.puts("state=#{state}")
+          end
+          RUBY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Note already published gem release
+        if: steps.published_state.outputs.state == 'all'
+        run: echo "Release version ${{ steps.release_version.outputs.value }} is already published for debugbundle; skipping RubyGems publish step."
+
+      - name: Validate package version
+        run: |
+          ruby <<'RUBY'
+          expected_version = ENV.fetch('RELEASE_VERSION')
+          raise "unexpected_prerelease_version:#{expected_version}" if expected_version.include?('-')
+
+          require_relative 'lib/debugbundle/version'
+
+          package_version = DebugBundle::VERSION
+          raise "package_version_mismatch:#{package_version}:#{expected_version}" unless package_version == expected_version
+          RUBY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Run quality gates
+        run: |
+          bundle exec rubocop
+          bundle exec rspec
+
+      - name: Build gem artifact
+        run: gem build debugbundle.gemspec
+
+      - name: Smoke test built gem
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmpdir="$(mktemp -d)"
+          export GEM_HOME="$tmpdir/gems"
+          export GEM_PATH="$GEM_HOME"
+          export PATH="$GEM_HOME/bin:$PATH"
+
+          gem install --no-document "./debugbundle-${RELEASE_VERSION}.gem"
+
+          ruby <<'RUBY'
+          require 'debugbundle'
+
+          raise 'missing_init' unless DebugBundle.respond_to?(:init)
+          raise 'missing_capture_exception' unless DebugBundle.respond_to?(:capture_exception)
+          raise 'version_mismatch' unless DebugBundle::VERSION == ENV.fetch('RELEASE_VERSION')
+          RUBY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.release_version.outputs.value }}
+          files: debugbundle-${{ steps.release_version.outputs.value }}.gem
+          generate_release_notes: true
+
+      - name: Ensure RubyGems API key is configured
+        if: steps.published_state.outputs.state == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RUBYGEMS_API_KEY:-}" ]]; then
+            echo "Missing RUBYGEMS_API_KEY secret for RubyGems publishing." >&2
+            exit 1
+          fi
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+
+      - name: Publish to RubyGems
+        if: steps.published_state.outputs.state == 'none'
+        run: gem push "debugbundle-${RELEASE_VERSION}.gem"
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+
+      - name: Smoke test published gem
+        if: steps.published_state.outputs.state == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmpdir="$(mktemp -d)"
+          export GEM_HOME="$tmpdir/gems"
+          export GEM_PATH="$GEM_HOME"
+          export PATH="$GEM_HOME/bin:$PATH"
+
+          gem install --no-document debugbundle -v "$RELEASE_VERSION"
+
+          ruby <<'RUBY'
+          require 'debugbundle'
+
+          raise 'missing_init' unless DebugBundle.respond_to?(:init)
+          raise 'missing_capture_exception' unless DebugBundle.respond_to?(:capture_exception)
+          raise 'version_mismatch' unless DebugBundle::VERSION == ENV.fetch('RELEASE_VERSION')
+          RUBY
+        env:
+          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}

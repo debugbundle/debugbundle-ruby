@@ -1,0 +1,9 @@
+/.bundle/
+/.debugbundle/
+/coverage/
+/gemfiles/vendor/
+/pkg/
+/tmp/
+/vendor/
+/.rspec_status
+*.gem
