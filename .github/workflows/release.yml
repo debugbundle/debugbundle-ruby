@@ -123,13 +123,6 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.release_version.outputs.value }}
-          files: debugbundle-${{ steps.release_version.outputs.value }}.gem
-          generate_release_notes: true
-
       - name: Ensure RubyGems API key is configured
         if: steps.published_state.outputs.state == 'none'
         shell: bash
@@ -172,3 +165,10 @@ jobs:
           RUBY
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.release_version.outputs.value }}
+          files: debugbundle-${{ steps.release_version.outputs.value }}.gem
+          generate_release_notes: true
