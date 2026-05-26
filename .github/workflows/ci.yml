@@ -81,3 +81,10 @@ jobs:
           ruby-version: "3.2"
           bundler-cache: true
       - run: gem build debugbundle.gemspec
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - run: make smoke

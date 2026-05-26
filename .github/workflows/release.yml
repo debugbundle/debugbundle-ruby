@@ -101,27 +101,10 @@ jobs:
       - name: Build gem artifact
         run: gem build debugbundle.gemspec
 
-      - name: Smoke test built gem
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tmpdir="$(mktemp -d)"
-          export GEM_HOME="$tmpdir/gems"
-          export GEM_PATH="$GEM_HOME"
-          export PATH="$GEM_HOME/bin:$PATH"
-
-          gem install --no-document "./debugbundle-${RELEASE_VERSION}.gem"
-
-          ruby <<'RUBY'
-          require 'debugbundle'
-
-          raise 'missing_init' unless DebugBundle.respond_to?(:init)
-          raise 'missing_capture_exception' unless DebugBundle.respond_to?(:capture_exception)
-          raise 'version_mismatch' unless DebugBundle::VERSION == ENV.fetch('RELEASE_VERSION')
-          RUBY
+      - name: App-driven smoke test built gem
+        run: make smoke
         env:
-          RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
+          VERSION: ${{ steps.release_version.outputs.value }}
 
       - name: Ensure RubyGems API key is configured
         if: steps.published_state.outputs.state == 'none'
@@ -143,26 +126,9 @@ jobs:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
           GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
 
-      - name: Smoke test published gem
+      - name: App-driven smoke test published gem
         if: steps.published_state.outputs.state == 'none'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          tmpdir="$(mktemp -d)"
-          export GEM_HOME="$tmpdir/gems"
-          export GEM_PATH="$GEM_HOME"
-          export PATH="$GEM_HOME/bin:$PATH"
-
-          gem install --no-document debugbundle -v "$RELEASE_VERSION"
-
-          ruby <<'RUBY'
-          require 'debugbundle'
-
-          raise 'missing_init' unless DebugBundle.respond_to?(:init)
-          raise 'missing_capture_exception' unless DebugBundle.respond_to?(:capture_exception)
-          raise 'version_mismatch' unless DebugBundle::VERSION == ENV.fetch('RELEASE_VERSION')
-          RUBY
+        run: make smoke-published VERSION=${RELEASE_VERSION}
         env:
           RELEASE_VERSION: ${{ steps.release_version.outputs.value }}
 
