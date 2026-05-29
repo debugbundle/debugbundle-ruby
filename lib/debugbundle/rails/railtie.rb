@@ -23,6 +23,7 @@ if defined?(Rails::Railtie)
           app.middleware.use(DebugBundle::Rack::Middleware, client: client)
           if DebugBundle::Rails.relay_route_enabled?(app)
             app.routes.append do
+              match DebugBundle::Rails.relay_path(app), to: DebugBundle::Rails::RelayEndpoint.new(app: app), via: :options
               post DebugBundle::Rails.relay_path(app), to: DebugBundle::Rails::RelayEndpoint.new(app: app)
             end
           end

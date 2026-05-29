@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Added `OPTIONS /debugbundle/browser` preflight handling and matching CORS headers for explicitly allowed split-host browser relay requests in the Rack and Rails relay surfaces.
+
 ## 0.1.0
 
 - Initial standalone gem scaffold.

@@ -16,7 +16,7 @@ module DebugBundle
     DEFAULT_MAX_BODY_BYTES = 262_144
     DEFAULT_RATE_LIMIT_PER_MINUTE = 60
 
-    Response = Struct.new(:status, :body, keyword_init: true)
+    Response = Struct.new(:status, :body, :headers, keyword_init: true)
 
     class Handler
       def initialize(
@@ -51,24 +51,33 @@ module DebugBundle
       end
 
       def handle(request)
-        return Response.new(status: 405, body: nil) unless request.fetch(:method, 'POST').to_s.upcase == 'POST'
-
+        method = request.fetch(:method, 'POST').to_s.upcase
         headers = normalize_headers(request[:headers] || {})
-        return Response.new(status: 403, body: nil) unless origin_allowed?(headers)
+        origin = source_origin(headers)
+        return Response.new(status: 403, body: nil, headers: {}) unless origin_allowed?(headers)
+
+        response_headers = origin ? cors_headers(origin) : {}
+        return with_headers(Response.new(status: 204, body: nil), response_headers) if method == 'OPTIONS'
+        return with_headers(Response.new(status: 405, body: nil), response_headers) unless method == 'POST'
+
         unless json_content_type?(headers['content-type'])
-          return Response.new(status: 400,
-                              body: invalid_body('Relay requests must use Content-Type: application/json.'))
+          return with_headers(Response.new(status: 400,
+                                           body: invalid_body('Relay requests must use Content-Type: application/json.')),
+                              response_headers)
         end
 
         raw_body = request[:body].to_s
-        return Response.new(status: 413, body: nil) if raw_body.bytesize > @max_body_bytes
-        return Response.new(status: 429, body: nil) if rate_limited?(request[:ip_address] || request[:ip])
+        return with_headers(Response.new(status: 413, body: nil), response_headers) if raw_body.bytesize > @max_body_bytes
+        if rate_limited?(request[:ip_address] || request[:ip])
+          return with_headers(Response.new(status: 429, body: nil), response_headers)
+        end
 
         decoded = JSON.parse(raw_body)
         batch = decoded.fetch('batch')
         unless batch.is_a?(Array)
-          return Response.new(status: 400,
-                              body: invalid_body('Relay request body must include a batch array.'))
+          return with_headers(Response.new(status: 400,
+                                           body: invalid_body('Relay request body must include a batch array.')),
+                              response_headers)
         end
 
         accepted = []
@@ -86,21 +95,37 @@ module DebugBundle
         deliver(accepted) unless accepted.empty?
 
         unless errors.empty?
-          return Response.new(status: 400,
-                              body: { 'accepted' => accepted.length,
-                                      'rejected' => errors.length, 'errors' => errors })
+          return with_headers(Response.new(status: 400,
+                                           body: { 'accepted' => accepted.length,
+                                                   'rejected' => errors.length, 'errors' => errors }),
+                              response_headers)
         end
 
-        Response.new(status: 202, body: { 'accepted' => accepted.length, 'rejected' => 0, 'errors' => [] })
+        with_headers(Response.new(status: 202, body: { 'accepted' => accepted.length, 'rejected' => 0, 'errors' => [] }),
+                     response_headers)
       rescue JSON::ParserError
-        Response.new(status: 400, body: invalid_body('Relay request body must be valid JSON.'))
+        with_headers(Response.new(status: 400, body: invalid_body('Relay request body must be valid JSON.')), response_headers || {})
       rescue KeyError
-        Response.new(status: 400, body: invalid_body('Relay request body must include a batch array.'))
+        with_headers(Response.new(status: 400, body: invalid_body('Relay request body must include a batch array.')), response_headers || {})
       rescue StandardError
-        Response.new(status: 500, body: nil)
+        with_headers(Response.new(status: 500, body: nil), response_headers || {})
       end
 
       private
+
+      def with_headers(response, headers)
+        Response.new(status: response.status, body: response.body, headers: headers.merge(response.headers || {}))
+      end
+
+      def cors_headers(origin)
+        {
+          'Access-Control-Allow-Origin' => origin,
+          'Access-Control-Allow-Methods' => 'POST, OPTIONS',
+          'Access-Control-Allow-Headers' => 'content-type',
+          'Access-Control-Max-Age' => '600',
+          'Vary' => 'Origin'
+        }
+      end
 
       def deliver(events)
         service_name = @service || events.first.dig('service', 'name') || 'service'
@@ -175,7 +200,7 @@ module DebugBundle
       end
 
       def origin_allowed?(headers)
-        origin = headers['origin'] || origin_from_referer(headers['referer'])
+        origin = source_origin(headers)
         return false if origin.nil? || origin.empty?
 
         return @allowed_origins.include?(normalize_origin(origin)) if @allowed_origins.any?
@@ -186,6 +211,10 @@ module DebugBundle
         URI.parse(origin).host == host
       rescue URI::InvalidURIError
         false
+      end
+
+      def source_origin(headers)
+        headers['origin'] || origin_from_referer(headers['referer'])
       end
 
       def origin_from_referer(referer)

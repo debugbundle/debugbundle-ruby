@@ -19,7 +19,7 @@ module DebugBundle
         )
 
         body = response.body ? JSON.generate(response.body) : ''
-        [response.status, { 'Content-Type' => 'application/json' }, [body]]
+        [response.status, { 'Content-Type' => 'application/json' }.merge(response.headers || {}), [body]]
       end
 
       private

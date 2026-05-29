@@ -73,6 +73,46 @@ RSpec.describe DebugBundle::Relay::Handler do
     expect(response.status).to eq(403)
   end
 
+  it 'answers allowed cross-origin preflight without delivering events' do
+    handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',
+                                  allowed_origins: ['https://web.example.com'])
+    response = handler.handle(
+      method: 'OPTIONS',
+      headers: {
+        'host' => 'api.example.com',
+        'origin' => 'https://web.example.com',
+        'access-control-request-method' => 'POST',
+        'access-control-request-headers' => 'content-type'
+      },
+      body: '',
+      ip_address: '127.0.0.1'
+    )
+
+    expect(response.status).to eq(204)
+    expect(response.headers).to include(
+      'Access-Control-Allow-Origin' => 'https://web.example.com',
+      'Access-Control-Allow-Methods' => 'POST, OPTIONS'
+    )
+  end
+
+  it 'adds CORS headers to accepted cross-origin relay posts' do
+    handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',
+                                  allowed_origins: ['https://web.example.com'])
+    response = handler.handle(
+      method: 'POST',
+      headers: {
+        'host' => 'api.example.com',
+        'origin' => 'https://web.example.com',
+        'content-type' => 'application/json'
+      },
+      body: JSON.generate('batch' => [browser_event]),
+      ip_address: '127.0.0.1'
+    )
+
+    expect(response.status).to eq(202)
+    expect(response.headers).to include('Access-Control-Allow-Origin' => 'https://web.example.com', 'Vary' => 'Origin')
+  end
+
   it 'supports a shared rate-limit store interface' do
     Dir.mktmpdir do |directory|
       store = Class.new do
@@ -172,7 +212,29 @@ RSpec.describe DebugBundle::Relay::Handler do
 
       expect(status).to eq(202)
       expect(headers).to include('Content-Type' => 'application/json')
+      expect(headers).to include('Access-Control-Allow-Origin' => 'https://app.example.com')
       expect(JSON.parse(body.fetch(0))).to include('accepted' => 1)
     end
+  end
+
+  it 'exposes Rack preflight headers' do
+    middleware = DebugBundle::Rack::RelayMiddleware.new(
+      nil,
+      handler: described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',
+                                   allowed_origins: ['https://web.example.com'])
+    )
+
+    status, headers, body = middleware.call(
+      'REQUEST_METHOD' => 'OPTIONS',
+      'HTTP_HOST' => 'api.example.com',
+      'HTTP_ORIGIN' => 'https://web.example.com',
+      'HTTP_ACCESS_CONTROL_REQUEST_METHOD' => 'POST',
+      'REMOTE_ADDR' => '127.0.0.1',
+      'rack.input' => StringIO.new('')
+    )
+
+    expect(status).to eq(204)
+    expect(headers).to include('Access-Control-Allow-Origin' => 'https://web.example.com')
+    expect(body.fetch(0)).to eq('')
   end
 end
