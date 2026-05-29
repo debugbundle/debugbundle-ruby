@@ -53,60 +53,27 @@ module DebugBundle
       def handle(request)
         method = request.fetch(:method, 'POST').to_s.upcase
         headers = normalize_headers(request[:headers] || {})
-        origin = source_origin(headers)
+        raw_body = request[:body].to_s
         return Response.new(status: 403, body: nil, headers: {}) unless origin_allowed?(headers)
 
-        response_headers = origin ? cors_headers(origin) : {}
-        return with_headers(Response.new(status: 204, body: nil), response_headers) if method == 'OPTIONS'
-        return with_headers(Response.new(status: 405, body: nil), response_headers) unless method == 'POST'
+        response_headers = source_origin(headers) ? cors_headers(source_origin(headers)) : {}
+        early_response = request_validation_response(
+          method: method,
+          headers: headers,
+          raw_body: raw_body,
+          ip_address: request[:ip_address] || request[:ip]
+        )
+        return with_headers(early_response, response_headers) if early_response
 
-        unless json_content_type?(headers['content-type'])
-          return with_headers(Response.new(status: 400,
-                                           body: invalid_body('Relay requests must use Content-Type: application/json.')),
-                              response_headers)
-        end
-
-        raw_body = request[:body].to_s
-        return with_headers(Response.new(status: 413, body: nil), response_headers) if raw_body.bytesize > @max_body_bytes
-        if rate_limited?(request[:ip_address] || request[:ip])
-          return with_headers(Response.new(status: 429, body: nil), response_headers)
-        end
-
-        decoded = JSON.parse(raw_body)
-        batch = decoded.fetch('batch')
-        unless batch.is_a?(Array)
-          return with_headers(Response.new(status: 400,
-                                           body: invalid_body('Relay request body must include a batch array.')),
-                              response_headers)
-        end
-
-        accepted = []
-        errors = []
-
-        batch.each_with_index do |candidate, index|
-          sanitized = sanitize_event(candidate)
-          if sanitized
-            accepted << sanitized
-          else
-            errors << "batch[#{index}]: Invalid browser relay event payload."
-          end
-        end
+        accepted, errors = sanitize_batch(raw_body)
 
         deliver(accepted) unless accepted.empty?
 
-        unless errors.empty?
-          return with_headers(Response.new(status: 400,
-                                           body: { 'accepted' => accepted.length,
-                                                   'rejected' => errors.length, 'errors' => errors }),
-                              response_headers)
-        end
-
-        with_headers(Response.new(status: 202, body: { 'accepted' => accepted.length, 'rejected' => 0, 'errors' => [] }),
-                     response_headers)
+        with_headers(batch_response(accepted, errors), response_headers)
       rescue JSON::ParserError
-        with_headers(Response.new(status: 400, body: invalid_body('Relay request body must be valid JSON.')), response_headers || {})
+        with_headers(invalid_json_response, response_headers || {})
       rescue KeyError
-        with_headers(Response.new(status: 400, body: invalid_body('Relay request body must include a batch array.')), response_headers || {})
+        with_headers(missing_batch_response, response_headers || {})
       rescue StandardError
         with_headers(Response.new(status: 500, body: nil), response_headers || {})
       end
@@ -115,6 +82,51 @@ module DebugBundle
 
       def with_headers(response, headers)
         Response.new(status: response.status, body: response.body, headers: headers.merge(response.headers || {}))
+      end
+
+      def request_validation_response(method:, headers:, raw_body:, ip_address:)
+        return Response.new(status: 204, body: nil) if method == 'OPTIONS'
+        return Response.new(status: 405, body: nil) unless method == 'POST'
+        return invalid_content_type_response unless json_content_type?(headers['content-type'])
+        return Response.new(status: 413, body: nil) if raw_body.bytesize > @max_body_bytes
+        return Response.new(status: 429, body: nil) if rate_limited?(ip_address)
+
+        nil
+      end
+
+      def invalid_content_type_response
+        Response.new(
+          status: 400,
+          body: invalid_body('Relay requests must use Content-Type: application/json.')
+        )
+      end
+
+      def invalid_json_response
+        Response.new(status: 400, body: invalid_body('Relay request body must be valid JSON.'))
+      end
+
+      def missing_batch_response
+        Response.new(status: 400, body: invalid_body('Relay request body must include a batch array.'))
+      end
+
+      def batch_response(accepted, errors)
+        return invalid_batch_response(accepted, errors) unless errors.empty?
+
+        Response.new(
+          status: 202,
+          body: { 'accepted' => accepted.length, 'rejected' => 0, 'errors' => [] }
+        )
+      end
+
+      def invalid_batch_response(accepted, errors)
+        Response.new(
+          status: 400,
+          body: {
+            'accepted' => accepted.length,
+            'rejected' => errors.length,
+            'errors' => errors
+          }
+        )
       end
 
       def cors_headers(origin)
@@ -140,6 +152,21 @@ module DebugBundle
           raise 'relay_forward_failed' unless result.status_code.between?(200, 299)
         else
           raise ArgumentError, 'unsupported relay project mode'
+        end
+      end
+
+      def sanitize_batch(raw_body)
+        decoded = JSON.parse(raw_body)
+        batch = decoded.fetch('batch')
+        raise KeyError unless batch.is_a?(Array)
+
+        batch.each_with_index.with_object([[], []]) do |(candidate, index), (accepted, errors)|
+          sanitized = sanitize_event(candidate)
+          if sanitized
+            accepted << sanitized
+          else
+            errors << "batch[#{index}]: Invalid browser relay event payload."
+          end
         end
       end
 
