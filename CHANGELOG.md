@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0
+
+- Marked the first stable Ruby gem release after the client, Rack/Rails/Sidekiq integration, relay, and app-driven smoke surfaces settled across the supported lanes.
+
 ## 0.1.3
 
 - Added `OPTIONS /debugbundle/browser` preflight handling and matching CORS headers for explicitly allowed split-host browser relay requests in the Rack and Rails relay surfaces.
