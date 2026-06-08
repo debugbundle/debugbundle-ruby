@@ -189,7 +189,9 @@ module DebugBundle
       enqueue_event(base_event('request_event', payload, merged_context.merge('request' => sanitized_request)))
     end
 
-    def capture_message(message, level: nil, context: nil) = capture_log(message, level: level || :info, context: context)
+    def capture_message(message, level: nil, context: nil)
+      capture_log(message, level: level || :info, context: context)
+    end
 
     def set_context(key, value)
       @context[key.to_s] = @redactor.redact_value(value)
