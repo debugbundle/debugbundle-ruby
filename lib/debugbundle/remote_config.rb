@@ -11,8 +11,11 @@ module DebugBundle
       :capture_breadcrumbs,
       :capture_probe_events,
       :immediate_client_error_statuses,
+      :immediate_client_error_path_rules,
       keyword_init: true
     )
+
+    ImmediateClientErrorPathRule = Struct.new(:status_code, :path_pattern, :methods, keyword_init: true)
 
     Directive = Struct.new(:id, :label_pattern, :service, :environment, :expires_at, keyword_init: true) do
       def active?(label:, service:, environment:, now:)
@@ -69,7 +72,8 @@ module DebugBundle
         capture_request_events: 'failures_only',
         capture_breadcrumbs: 'local_only',
         capture_probe_events: 'buffer_only',
-        immediate_client_error_statuses: []
+        immediate_client_error_statuses: [],
+        immediate_client_error_path_rules: []
       )
     end
 
@@ -80,7 +84,8 @@ module DebugBundle
         capture_request_events: 'failures_only',
         capture_breadcrumbs: 'exception_only',
         capture_probe_events: 'buffer_only',
-        immediate_client_error_statuses: []
+        immediate_client_error_statuses: [],
+        immediate_client_error_path_rules: []
       )
     end
 
@@ -122,8 +127,40 @@ module DebugBundle
         capture_probe_events: payload['capture_probe_events'] || payload[:capture_probe_events] || 'buffer_only',
         immediate_client_error_statuses: Array(
           payload['immediate_client_error_statuses'] || payload[:immediate_client_error_statuses]
-        ).grep(Integer)
+        ).grep(Integer),
+        immediate_client_error_path_rules: parse_immediate_client_error_path_rules(
+          payload['immediate_client_error_path_rules'] || payload[:immediate_client_error_path_rules]
+        )
       )
+    end
+
+    def self.parse_immediate_client_error_path_rules(value)
+      entries = Array(value)
+      return [] if entries.empty? || entries.length > 25
+
+      entries.filter_map do |entry|
+        next unless entry.is_a?(Hash)
+
+        status_code = entry['status_code'] || entry[:status_code]
+        path_pattern = entry['path_pattern'] || entry[:path_pattern]
+        raw_methods = Array(entry['methods'] || entry[:methods])
+        next unless status_code.is_a?(Integer) && (400..499).cover?(status_code)
+        next unless valid_path_pattern?(path_pattern)
+        next if raw_methods.length > 7
+
+        methods = raw_methods.map { |method| method.to_s.upcase }.uniq
+        next unless methods.all? { |method| %w[GET POST PUT PATCH DELETE HEAD OPTIONS].include?(method) }
+
+        ImmediateClientErrorPathRule.new(status_code: status_code, path_pattern: path_pattern, methods: methods)
+      end
+    end
+
+    def self.valid_path_pattern?(value)
+      return false unless value.is_a?(String)
+      return false if value.empty? || value.length > 256 || !value.start_with?('/') || value.include?('?') || value.include?('#')
+
+      wildcard_index = value.index('*')
+      wildcard_index.nil? || wildcard_index == value.length - 1
     end
 
     def self.parse_directive(payload)

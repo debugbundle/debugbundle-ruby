@@ -2,6 +2,7 @@
 
 require 'digest'
 require 'time'
+require 'uri'
 
 require 'debugbundle/runtime'
 
@@ -23,7 +24,6 @@ module DebugBundle
     ].freeze
     BALANCED_IMMEDIATE_REQUEST_STATUSES = [408, 423, 424, 425, 429].freeze
     INVESTIGATIVE_IMMEDIATE_REQUEST_STATUSES = (BALANCED_IMMEDIATE_REQUEST_STATUSES + [409]).freeze
-    BALANCED_ANOMALY_REQUEST_STATUSES = [400, 401, 403, 404, 409, 410, 422].freeze
     LOCAL_ENVIRONMENTS = %w[development local test].freeze
     REQUEST_TRIGGER_DIRECTIVES_KEY = :__debugbundle_request_trigger_directives__
     THREAD_HOOK_MUTEX = Mutex.new
@@ -172,7 +172,7 @@ module DebugBundle
       sanitized_request = request_payload(request)
       sanitized_response = response_payload(response)
       response_status = (sanitized_response['status_code'] || 0).to_i
-      return unless capture_request_event?(response_status)
+      return unless capture_request_event?(response_status, sanitized_request)
 
       payload = {
         'method' => sanitized_request['method'],
@@ -591,14 +591,20 @@ module DebugBundle
       end
     end
 
-    def capture_request_event?(status_code)
+    def capture_request_event?(status_code, request)
       mode = @capture_policy.capture_request_events
-      immediate_statuses = immediate_request_statuses
-      anomaly_statuses = anomaly_request_statuses
 
       return true if mode == 'all'
-      return true if immediate_statuses.include?(status_code)
-      return true if mode == 'failures_only' && anomaly_statuses.include?(status_code)
+      return true if immediate_request_event?(status_code, request)
+      return true if mode == 'failures_only' && status_code >= 500
+
+      false
+    end
+
+    def immediate_request_event?(status_code, request)
+      return true if status_code >= 500
+      return true if immediate_request_statuses.include?(status_code)
+      return true if matching_immediate_client_error_path_rule?(status_code, request)
 
       false
     end
@@ -616,10 +622,34 @@ module DebugBundle
       statuses + Array(@capture_policy.immediate_client_error_statuses)
     end
 
-    def anomaly_request_statuses
-      return [] if @capture_policy.preset == 'minimal'
+    def matching_immediate_client_error_path_rule?(status_code, request)
+      return false unless (400..499).cover?(status_code)
 
-      BALANCED_ANOMALY_REQUEST_STATUSES
+      path = normalize_request_path(request['path'] || request['url'])
+      method = request['method'].to_s.upcase
+      Array(@capture_policy.immediate_client_error_path_rules).any? do |rule|
+        next false unless rule.status_code == status_code
+        next false if !rule.methods.empty? && !rule.methods.include?(method)
+
+        if rule.path_pattern.end_with?('*')
+          path.start_with?(rule.path_pattern.delete_suffix('*'))
+        else
+          path == rule.path_pattern
+        end
+      end
+    end
+
+    def normalize_request_path(value)
+      begin
+        uri = URI.parse(value.to_s)
+        return uri.path if uri.path && !uri.path.empty?
+      rescue URI::InvalidURIError
+        # Fall through to the lightweight path-only fallback.
+      end
+      fallback = value.to_s.split('?', 2).first.to_s.split('#', 2).first
+      return fallback if fallback.start_with?('/') && !fallback.empty?
+
+      '/'
     end
 
     def matching_probe_directives(label)

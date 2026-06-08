@@ -23,7 +23,7 @@ RSpec.describe 'Rack integration' do
     client = DebugBundle::Client.new(project_token: 'dbundle_proj_test', service: 'rack-checkout', transport: transport)
     app = Rack::Builder.new do
       use DebugBundle::Rack::Middleware, client: client
-      run ->(_env) { [422, { 'Content-Type' => 'text/plain' }, ['ok']] }
+      run ->(_env) { [503, { 'Content-Type' => 'text/plain' }, ['ok']] }
     end.to_app
 
     response = Rack::MockRequest.new(app).get(
@@ -35,10 +35,10 @@ RSpec.describe 'Rack integration' do
     client.flush
     event = transport_events.fetch(0).fetch(:events).fetch(0)
 
-    expect(response.status).to eq(422)
+    expect(response.status).to eq(503)
     expect(response.body).to eq('ok')
     expect(event.fetch('event_type')).to eq('request_event')
     expect(event.fetch('correlation')).to include('request_id' => 'req-rack', 'trace_id' => 'trace-rack')
-    expect(event.fetch('payload')).to include('path' => '/checkout', 'method' => 'GET', 'response_status' => 422)
+    expect(event.fetch('payload')).to include('path' => '/checkout', 'method' => 'GET', 'response_status' => 503)
   end
 end
