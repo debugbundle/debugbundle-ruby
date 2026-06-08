@@ -142,9 +142,7 @@ module DebugBundle
       enqueue_event(base_event('backend_exception', payload, merged_context))
     end
 
-    def capture_error(error, context: nil, handled: true)
-      capture_exception(error, context: context, handled: handled)
-    end
+    def capture_error(error, context: nil, handled: true) = capture_exception(error, context: context, handled: handled)
 
     def capture_log(message, level: :warning, context: nil)
       return unless capture_enabled?
@@ -191,9 +189,7 @@ module DebugBundle
       enqueue_event(base_event('request_event', payload, merged_context.merge('request' => sanitized_request)))
     end
 
-    def capture_message(message, level: nil, context: nil)
-      capture_log(message, level: level || :info, context: context)
-    end
+    def capture_message(message, level: nil, context: nil) = capture_log(message, level: level || :info, context: context)
 
     def set_context(key, value)
       @context[key.to_s] = @redactor.redact_value(value)
@@ -371,9 +367,7 @@ module DebugBundle
       :healthy
     end
 
-    def buffered_event_count
-      @buffer_mutex.synchronize { @buffer.length }
-    end
+    def buffered_event_count = @buffer_mutex.synchronize { @buffer.length }
 
     private
 
@@ -400,9 +394,7 @@ module DebugBundle
       )
     end
 
-    def capture_enabled?
-      config.enabled? && config.configured?
-    end
+    def capture_enabled? = config.enabled? && config.configured?
 
     def merge_context(context)
       merged = @context.merge(stringify_hash(context || {}))
@@ -437,9 +429,7 @@ module DebugBundle
       }
     end
 
-    def runtime_payload
-      Runtime.payload
-    end
+    def runtime_payload = Runtime.payload
 
     def exception_causes(error)
       causes = []
@@ -521,13 +511,9 @@ module DebugBundle
       }
     end
 
-    def service_name
-      config.service || DEFAULT_SERVICE_NAME
-    end
+    def service_name = config.service || DEFAULT_SERVICE_NAME
 
-    def environment_name
-      config.environment || DEFAULT_ENVIRONMENT
-    end
+    def environment_name = config.environment || DEFAULT_ENVIRONMENT
 
     def correlation_payload(context)
       request = object_to_hash(context['request'])
@@ -629,7 +615,7 @@ module DebugBundle
       method = request['method'].to_s.upcase
       Array(@capture_policy.immediate_client_error_path_rules).any? do |rule|
         next false unless rule.status_code == status_code
-        next false if !rule.methods.empty? && !rule.methods.include?(method)
+        next false if !rule.http_methods.empty? && !rule.http_methods.include?(method)
 
         if rule.path_pattern.end_with?('*')
           path.start_with?(rule.path_pattern.delete_suffix('*'))
@@ -660,9 +646,7 @@ module DebugBundle
       end
     end
 
-    def current_request_trigger_directives
-      Array(Thread.current[REQUEST_TRIGGER_DIRECTIVES_KEY])
-    end
+    def current_request_trigger_directives = Array(Thread.current[REQUEST_TRIGGER_DIRECTIVES_KEY])
 
     def matching_request_trigger_directives(label)
       current_request_trigger_directives.select do |directive|
@@ -701,13 +685,9 @@ module DebugBundle
       0
     end
 
-    def rate_limited?
-      @retry_at && @retry_at > now
-    end
+    def rate_limited? = @retry_at && @retry_at > now
 
-    def local_environment?
-      LOCAL_ENVIRONMENTS.include?(environment_name.to_s)
-    end
+    def local_environment? = LOCAL_ENVIRONMENTS.include?(environment_name.to_s)
 
     def poll_remote_config_if_due!
       return unless @config_fetcher
@@ -743,12 +723,8 @@ module DebugBundle
       nil
     end
 
-    def now
-      @time_provider.call
-    end
+    def now = @time_provider.call
 
-    def monotonic_now
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    end
+    def monotonic_now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 end

@@ -15,7 +15,7 @@ module DebugBundle
       keyword_init: true
     )
 
-    ImmediateClientErrorPathRule = Struct.new(:status_code, :path_pattern, :methods, keyword_init: true)
+    ImmediateClientErrorPathRule = Struct.new(:status_code, :path_pattern, :http_methods, keyword_init: true)
 
     Directive = Struct.new(:id, :label_pattern, :service, :environment, :expires_at, keyword_init: true) do
       def active?(label:, service:, environment:, now:)
@@ -148,16 +148,22 @@ module DebugBundle
         next unless valid_path_pattern?(path_pattern)
         next if raw_methods.length > 7
 
-        methods = raw_methods.map { |method| method.to_s.upcase }.uniq
-        next unless methods.all? { |method| %w[GET POST PUT PATCH DELETE HEAD OPTIONS].include?(method) }
+        http_methods = raw_methods.map { |method| method.to_s.upcase }.uniq
+        next unless http_methods.all? { |method| %w[GET POST PUT PATCH DELETE HEAD OPTIONS].include?(method) }
 
-        ImmediateClientErrorPathRule.new(status_code: status_code, path_pattern: path_pattern, methods: methods)
+        ImmediateClientErrorPathRule.new(
+          status_code: status_code,
+          path_pattern: path_pattern,
+          http_methods: http_methods
+        )
       end
     end
 
     def self.valid_path_pattern?(value)
       return false unless value.is_a?(String)
-      return false if value.empty? || value.length > 256 || !value.start_with?('/') || value.include?('?') || value.include?('#')
+      return false if value.empty? || value.length > 256
+      return false unless value.start_with?('/')
+      return false if value.include?('?') || value.include?('#')
 
       wildcard_index = value.index('*')
       wildcard_index.nil? || wildcard_index == value.length - 1
