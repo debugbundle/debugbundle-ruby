@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- Release quality gates so the published Ruby SDK patch ships cleanly without changing runtime behavior.
+
 ## 1.1.1
 
 - Normalized canonical event-envelope emission so custom app context now stays in envelope `context`, request events avoid legacy payload extras, and installed projects stop tripping malformed ingestion rejects after upgrade.

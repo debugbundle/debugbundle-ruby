@@ -41,9 +41,7 @@ module DebugBundle
     class << self
       attr_accessor :thread_exception_client
 
-      def dispatch_thread_exception(error)
-        thread_exception_client&.__send__(:capture_thread_exception, error)
-      end
+      def dispatch_thread_exception(error) = thread_exception_client&.__send__(:capture_thread_exception, error)
 
       def install_thread_exception_hook!
         THREAD_HOOK_MUTEX.synchronize do
