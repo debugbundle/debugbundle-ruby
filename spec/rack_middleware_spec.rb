@@ -195,10 +195,14 @@ RSpec.describe DebugBundle::Rack::Middleware do
     )
 
     client.flush
-    payload = transport_events.fetch(0).fetch(:events).fetch(0).fetch('payload')
+    event = transport_events.fetch(0).fetch(:events).fetch(0)
+    payload = event.fetch('payload')
+    context = event.fetch('context')
 
     expect(payload).to include(
-      'route_template' => '/patients/:patient_id/checkouts',
+      'route_template' => '/patients/:patient_id/checkouts'
+    )
+    expect(context).to include(
       'controller' => 'checkouts',
       'action' => 'create'
     )

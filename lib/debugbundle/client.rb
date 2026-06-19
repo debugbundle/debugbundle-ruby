@@ -128,18 +128,17 @@ module DebugBundle
       }
 
       causes = exception_causes(error)
-      payload['causes'] = causes unless causes.empty?
 
       probe_data = probe_snapshot
       payload['probe_data'] = probe_data unless probe_data.empty?
 
       extra_context = merged_context.except('request', 'response', 'correlation')
-      payload['context'] = extra_context unless extra_context.empty?
+      extra_context['causes'] = causes unless causes.empty?
 
       suppression_key = [payload['name'], payload['message'], payload['stack']].join(':')
       return unless @suppression.should_capture(suppression_key, now: monotonic_now)
 
-      enqueue_event(base_event('backend_exception', payload, merged_context))
+      enqueue_event(base_event('backend_exception', payload, extra_context))
     end
 
     def capture_error(error, context: nil, handled: true) = capture_exception(error, context: context, handled: handled)
@@ -181,8 +180,6 @@ module DebugBundle
         'response_status' => response_status,
         'duration_ms' => extract_duration_ms(merged_context, sanitized_response),
         'route_template' => merged_context['route_template'],
-        'controller' => merged_context['controller'],
-        'action' => merged_context['action'],
         'response_headers' => sanitized_response['headers'],
         'response_body' => sanitized_response['body']
       }
@@ -414,8 +411,8 @@ module DebugBundle
     def request_payload(request)
       source = object_to_hash(request)
       {
-        'method' => source['method'],
-        'path' => source['path'],
+        'method' => source['method'] || 'UNKNOWN',
+        'path' => source['path'] || '/',
         'query' => @redactor.redact_value(source['query'] || {}),
         'headers' => sanitized_headers(source['headers'] || {}),
         'body' => @redactor.redact_value(source['body'] || {})
@@ -494,7 +491,7 @@ module DebugBundle
     end
 
     def base_event(event_type, payload, context)
-      {
+      event = {
         'schema_version' => SCHEMA_VERSION,
         'event_id' => SecureRandom.uuid,
         'event_type' => event_type,
@@ -511,6 +508,9 @@ module DebugBundle
         'correlation' => correlation_payload(context),
         'payload' => @redactor.redact_value(payload)
       }
+      envelope_context = event_context(context)
+      event['context'] = envelope_context unless envelope_context.empty?
+      event
     end
 
     def service_name = config.service || DEFAULT_SERVICE_NAME
@@ -526,6 +526,18 @@ module DebugBundle
         'session_id' => correlation['session_id'] || context['session_id'],
         'user_id_hash' => correlation['user_id_hash'] || context['user_id_hash']
       }
+    end
+
+    def event_context(context)
+      object_to_hash(context).except(
+        'request',
+        'response',
+        'correlation',
+        'request_id',
+        'trace_id',
+        'session_id',
+        'user_id_hash'
+      )
     end
 
     def object_to_hash(value)

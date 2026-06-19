@@ -50,7 +50,7 @@ if defined?(Sidekiq)
 
       expect(event.fetch('event_type')).to eq('backend_exception')
       expect(event.fetch('correlation')).to include('trace_id' => 'trace-chain-1')
-      expect(event.fetch('payload').fetch('context').fetch('job')).to include(
+      expect(event.fetch('context').fetch('job')).to include(
         'class' => 'CheckoutWorker',
         'queue' => 'critical',
         'jid' => 'jid-chain-1'
