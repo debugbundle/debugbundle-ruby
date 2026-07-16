@@ -57,6 +57,36 @@ RSpec.describe DebugBundle::Relay::Handler do
     end
   end
 
+  it 'preserves analytics correlation fields for analytics relay events' do
+    analytics_event = browser_event.merge(
+      'event_type' => 'analytics_event',
+      'correlation' => {
+        'session_id' => 'session-analytics',
+        'visitor_id_hash' => 'sha256:' + ('a' * 64),
+        'user_id_hash' => nil,
+        'trace_id' => 'trace-analytics',
+        'deploy_id' => 'deploy-analytics'
+      },
+      'payload' => { 'kind' => 'page_view', 'privacy' => { 'mode' => 'standard', 'consent_granted' => true } }
+    )
+
+    Dir.mktmpdir do |directory|
+      handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',
+                                    local_events_dir: directory)
+      response = handler.handle(
+        method: 'POST',
+        headers: { 'host' => 'app.example.com', 'origin' => 'https://app.example.com', 'content-type' => 'application/json' },
+        body: JSON.generate('batch' => [analytics_event]),
+        ip_address: '127.0.0.2'
+      )
+
+      expect(response.status).to eq(202)
+      file_name = Dir.children(directory).find { |entry| entry.end_with?('.events.json') }
+      event = JSON.parse(File.read(File.join(directory, file_name))).fetch(0)
+      expect(event.fetch('correlation')).to eq(analytics_event.fetch('correlation'))
+    end
+  end
+
   it 'rejects wrong origins' do
     handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server')
     response = handler.handle(

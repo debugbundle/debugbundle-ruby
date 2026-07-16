@@ -11,6 +11,7 @@ module DebugBundle
       frontend_breadcrumb
       request_event
       probe_event
+      analytics_event
     ].freeze
     BROWSER_SDK_NAME = '@debugbundle/sdk-browser'
     DEFAULT_MAX_BODY_BYTES = 262_144
@@ -192,20 +193,20 @@ module DebugBundle
             'name' => @service || service['name'].to_s,
             'environment' => @environment || service['environment'].to_s
           },
-          'correlation' => sanitize_correlation(correlation),
+          'correlation' => sanitize_correlation(correlation, event_type),
           'payload' => payload,
           'project_token' => @project_token
         }
       end
 
-      def sanitize_correlation(value)
+      def sanitize_correlation(value, event_type)
         correlation = value.is_a?(Hash) ? value : {}
-        {
-          'request_id' => string_or_nil(correlation['request_id']),
-          'trace_id' => string_or_nil(correlation['trace_id']),
-          'session_id' => string_or_nil(correlation['session_id']),
-          'user_id_hash' => string_or_nil(correlation['user_id_hash'])
-        }
+        keys = event_type == 'analytics_event' \
+          ? %w[session_id visitor_id_hash user_id_hash trace_id deploy_id] \
+          : %w[request_id trace_id session_id user_id_hash]
+        keys.each_with_object({}) do |key, sanitized|
+          sanitized[key] = string_or_nil(correlation[key]) if correlation.key?(key)
+        end
       end
 
       def string_or_nil(value)
