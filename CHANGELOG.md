@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Accepted canonical browser `analytics_event` envelopes through the Rack and Rails relay while retaining the existing validation, origin controls, rate limits, and durable delivery semantics.
+
 ## 1.1.2
 
 - Release quality gates so the published Ruby SDK patch ships cleanly without changing runtime behavior.

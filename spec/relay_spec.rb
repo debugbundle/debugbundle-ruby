@@ -62,7 +62,7 @@ RSpec.describe DebugBundle::Relay::Handler do
       'event_type' => 'analytics_event',
       'correlation' => {
         'session_id' => 'session-analytics',
-        'visitor_id_hash' => 'sha256:' + ('a' * 64),
+        'visitor_id_hash' => "sha256:#{'a' * 64}",
         'user_id_hash' => nil,
         'trace_id' => 'trace-analytics',
         'deploy_id' => 'deploy-analytics'
@@ -75,7 +75,11 @@ RSpec.describe DebugBundle::Relay::Handler do
                                     local_events_dir: directory)
       response = handler.handle(
         method: 'POST',
-        headers: { 'host' => 'app.example.com', 'origin' => 'https://app.example.com', 'content-type' => 'application/json' },
+        headers: {
+          'host' => 'app.example.com',
+          'origin' => 'https://app.example.com',
+          'content-type' => 'application/json'
+        },
         body: JSON.generate('batch' => [analytics_event]),
         ip_address: '127.0.0.2'
       )

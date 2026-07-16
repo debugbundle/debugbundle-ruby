@@ -201,9 +201,11 @@ module DebugBundle
 
       def sanitize_correlation(value, event_type)
         correlation = value.is_a?(Hash) ? value : {}
-        keys = event_type == 'analytics_event' \
-          ? %w[session_id visitor_id_hash user_id_hash trace_id deploy_id] \
-          : %w[request_id trace_id session_id user_id_hash]
+        keys = if event_type == 'analytics_event'
+                 %w[session_id visitor_id_hash user_id_hash trace_id deploy_id]
+               else
+                 %w[request_id trace_id session_id user_id_hash]
+               end
         keys.each_with_object({}) do |key, sanitized|
           sanitized[key] = string_or_nil(correlation[key]) if correlation.key?(key)
         end
