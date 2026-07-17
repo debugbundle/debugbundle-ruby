@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+- Corrected the semantic release line for browser-relay analytics support. Relay handlers accept credential-free `analytics_event` envelopes while preserving only the required analytics correlation fields and stripping browser-supplied credentials.
+
 ## 1.1.3
 
 - Accepted canonical browser `analytics_event` envelopes through the Rack and Rails relay while retaining the existing validation, origin controls, rate limits, and durable delivery semantics.
