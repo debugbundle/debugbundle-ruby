@@ -1,7 +1,7 @@
 PATH
   remote: ..
   specs:
-    debugbundle (1.2.0)
+    debugbundle (1.3.0)
       base64 (~> 0.2)
       logger (~> 1.6)
 
@@ -138,6 +138,8 @@ GEM
       net-protocol
     nio4r (2.7.5)
     nokogiri (1.18.10-aarch64-linux-gnu)
+      racc (~> 1.4)
+    nokogiri (1.18.10-x86_64-linux-gnu)
       racc (~> 1.4)
     parallel (1.28.0)
     parser (3.3.11.1)
