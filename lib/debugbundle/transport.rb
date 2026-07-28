@@ -10,7 +10,7 @@ module DebugBundle
   module Transport
     RETRY_AFTER_CAP_SECONDS = 300
 
-    Result = Struct.new(:status_code, :retry_after_seconds, keyword_init: true)
+    Result = Struct.new(:status_code, :retry_after_seconds, :body, keyword_init: true)
 
     def self.sdk_config_endpoint(events_endpoint)
       uri = URI.parse(events_endpoint)
@@ -36,7 +36,8 @@ module DebugBundle
 
       Result.new(
         status_code: result.status_code.to_i,
-        retry_after_seconds: result.respond_to?(:retry_after_seconds) ? result.retry_after_seconds : nil
+        retry_after_seconds: result.respond_to?(:retry_after_seconds) ? result.retry_after_seconds : nil,
+        body: result.respond_to?(:body) ? result.body : nil
       )
     end
 
@@ -62,13 +63,22 @@ module DebugBundle
 
         Result.new(
           status_code: response.code.to_i,
-          retry_after_seconds: parse_retry_after(response['Retry-After'])
+          retry_after_seconds: parse_retry_after(response['Retry-After']),
+          body: parse_body(response.body)
         )
       rescue StandardError
         Result.new(status_code: 500)
       end
 
       private
+
+      def parse_body(body)
+        return nil if body.to_s.empty?
+
+        JSON.parse(body)
+      rescue JSON::ParserError
+        body
+      end
 
       def parse_retry_after(value)
         return nil if value.nil? || value.strip.empty?

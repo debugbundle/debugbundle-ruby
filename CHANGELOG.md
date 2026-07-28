@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+## 1.3.0 - 2026-07-28
+
+- Added the universal `before_send` event hook and canonical object wrapping for scalar/list probe values.
+- Reconcile connected ingestion acknowledgements per event, retaining only retryable rejections and withholding delivery health when no event was accepted.
+- Enforce the required 80% coverage floor for each source file.
+
 ## 1.2.0
 
 - Corrected the semantic release line for browser-relay analytics support. Relay handlers accept credential-free `analytics_event` envelopes while preserving only the required analytics correlation fields and stripping browser-supplied credentials.

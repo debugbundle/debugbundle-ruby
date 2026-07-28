@@ -30,6 +30,7 @@ Metrics/ModuleLength:
 
 Metrics/ParameterLists:
   Max: 20
+  CountKeywordArgs: false
 
 Metrics/PerceivedComplexity:
   Max: 20

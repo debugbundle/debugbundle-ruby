@@ -6,7 +6,10 @@ SimpleCov.start do
   add_filter '/spec/'
 
   minimum_coverage_threshold = ENV.fetch('SIMPLECOV_MINIMUM_COVERAGE', '80').to_i
-  minimum_coverage minimum_coverage_threshold if minimum_coverage_threshold.positive?
+  if minimum_coverage_threshold.positive?
+    minimum_coverage minimum_coverage_threshold
+    minimum_coverage_by_file minimum_coverage_threshold
+  end
 end
 
 require 'debugbundle'

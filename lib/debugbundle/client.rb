@@ -4,6 +4,7 @@ require 'digest'
 require 'time'
 require 'uri'
 
+require 'debugbundle/client_event_support'
 require 'debugbundle/runtime'
 
 module DebugBundle
@@ -96,6 +97,7 @@ module DebugBundle
       @last_event_at = nil
       @retry_at = nil
       @consecutive_failures = 0
+      @acknowledgement_state = nil
       @at_exit_registered = false
       @thread_exception_registered = false
       @logger_bindings = {}
@@ -110,6 +112,10 @@ module DebugBundle
     end
 
     def capture_exception(error, context: nil, handled: true)
+      capture_exception_internal(error, context: context, handled: handled, run_before_send: true)
+    end
+
+    def capture_exception_internal(error, context:, handled:, run_before_send:)
       return unless capture_enabled?
 
       poll_remote_config_if_due!
@@ -133,11 +139,22 @@ module DebugBundle
       extra_context = merged_context.except('request', 'response', 'correlation')
       extra_context['causes'] = causes unless causes.empty?
 
-      suppression_key = [payload['name'], payload['message'], payload['stack']].join(':')
+      event = base_event('backend_exception', payload, extra_context)
+      event = apply_before_send(event) if run_before_send
+      return if event.nil?
+
+      event_payload = event.fetch('payload')
+      suppression_key = [
+        event['event_type'],
+        event_payload['name'],
+        event_payload['message'],
+        event_payload['stack']
+      ].join(':')
       return unless @suppression.should_capture(suppression_key, now: monotonic_now)
 
-      enqueue_event(base_event('backend_exception', payload, extra_context))
+      enqueue_event(event)
     end
+    private :capture_exception_internal
 
     def capture_error(error, context: nil, handled: true) = capture_exception(error, context: context, handled: handled)
 
@@ -147,7 +164,6 @@ module DebugBundle
       poll_remote_config_if_due!
 
       normalized_level = normalize_level(level || :warning)
-      return unless level_enabled?(normalized_level)
 
       merged_context = merge_context(context)
       payload = {
@@ -155,7 +171,10 @@ module DebugBundle
         'message' => message.to_s,
         'attributes' => merged_context
       }
-      enqueue_event(base_event('log_event', payload, merged_context))
+      event = apply_before_send(base_event('log_event', payload, merged_context))
+      return if event.nil? || !level_enabled?(normalized_level)
+
+      enqueue_event(event)
     end
 
     def capture_request(request, response, context: nil)
@@ -167,7 +186,6 @@ module DebugBundle
       sanitized_request = request_payload(request)
       sanitized_response = response_payload(response)
       response_status = (sanitized_response['status_code'] || 0).to_i
-      return unless capture_request_event?(response_status, sanitized_request)
 
       payload = {
         'method' => sanitized_request['method'],
@@ -181,7 +199,12 @@ module DebugBundle
         'response_headers' => sanitized_response['headers'],
         'response_body' => sanitized_response['body']
       }
-      enqueue_event(base_event('request_event', payload, merged_context.merge('request' => sanitized_request)))
+      event = apply_before_send(
+        base_event('request_event', payload, merged_context.merge('request' => sanitized_request))
+      )
+      return if event.nil? || !capture_request_event?(response_status, sanitized_request)
+
+      enqueue_event(event)
     end
 
     def capture_message(message, level: nil, context: nil)
@@ -203,18 +226,22 @@ module DebugBundle
       if heavy
         return if matching_directives.empty?
 
-        raw_value = block ? block.call : data
-        emit_probe_events(label.to_s, @redactor.redact_value(raw_value), matching_directives)
+        resolved, raw_value = resolve_probe_value(data, block)
+        return unless resolved
+
+        emit_probe_events(label.to_s, normalize_probe_data(raw_value), matching_directives)
         return
       end
 
       return if !@probe_buffers.key?(label) && @probe_buffers.size >= config.max_probe_labels
 
-      raw_value = block ? block.call : data
+      resolved, raw_value = resolve_probe_value(data, block)
+      return unless resolved
+
       entry = {
         'label' => label.to_s,
-        'data' => @redactor.redact_value(raw_value),
-        'occurred_at' => now.iso8601
+        'data' => normalize_probe_data(raw_value),
+        'timestamp' => now.iso8601
       }
 
       bucket = (@probe_buffers[label.to_s] ||= [])
@@ -240,7 +267,13 @@ module DebugBundle
         error = $ERROR_INFO
         next unless error.is_a?(Exception)
 
-        client.capture_exception(error, handled: false)
+        client.__send__(
+          :capture_exception_internal,
+          error,
+          context: nil,
+          handled: false,
+          run_before_send: false
+        )
         client.flush
       end
       true
@@ -329,11 +362,7 @@ module DebugBundle
 
         case result.status_code
         when 200..299
-          remove_buffered_events(batch)
-          @retry_at = nil
-          @consecutive_failures = 0
-          @last_event_at = now
-          true
+          handle_successful_result(result, batch)
         when 429
           @consecutive_failures += 1
           retry_after_seconds = (result.retry_after_seconds || 1).clamp(1, RETRY_AFTER_CAP_SECONDS)
@@ -358,6 +387,7 @@ module DebugBundle
     def status
       return :disconnected unless config.enabled?
       return :degraded unless config.configured?
+      return @acknowledgement_state if @acknowledgement_state
       return :disconnected if @consecutive_failures >= 3
       return :degraded if rate_limited?
 
@@ -367,6 +397,48 @@ module DebugBundle
     def buffered_event_count = @buffer_mutex.synchronize { @buffer.length }
 
     private
+
+    def handle_successful_result(result, batch)
+      decision = Acknowledgement.decide(result.body, batch.length)
+      return handle_protocol_failure if decision[:kind] == :protocol_failure
+
+      if decision[:kind] == :legacy
+        remove_buffered_events(batch)
+        record_success
+        return true
+      end
+
+      retryable_indices = decision.fetch(:retryable_indices)
+      retryable_events = retryable_indices.map { |index| batch.fetch(index) }
+      remove_buffered_events(batch - retryable_events)
+      @last_event_at = now if decision.fetch(:accepted).positive?
+
+      if retryable_events.any?
+        @consecutive_failures += 1
+        @retry_at = now + 1
+        @acknowledgement_state = :degraded
+        false
+      else
+        @retry_at = nil
+        @consecutive_failures = 0
+        @acknowledgement_state = decision.fetch(:accepted).positive? ? nil : :disconnected
+        decision.fetch(:accepted).positive?
+      end
+    end
+
+    def handle_protocol_failure
+      @consecutive_failures += 1
+      @retry_at = now + 1
+      @acknowledgement_state = :degraded
+      false
+    end
+
+    def record_success
+      @retry_at = nil
+      @consecutive_failures = 0
+      @acknowledgement_state = nil
+      @last_event_at = now
+    end
 
     def build_default_transport
       return nil unless config.enabled?
@@ -389,204 +461,6 @@ module DebugBundle
         sdk_name: SDK_NAME,
         sdk_version: DebugBundle::VERSION
       )
-    end
-
-    def capture_enabled? = config.enabled? && config.configured?
-
-    def merge_context(context)
-      merged = @context.merge(stringify_hash(context || {}))
-      @redactor.redact_value(merged)
-    end
-
-    def stringify_hash(value)
-      return {} unless value.is_a?(Hash)
-
-      value.each_with_object({}) do |(key, nested_value), result|
-        result[key.to_s] = nested_value
-      end
-    end
-
-    def request_payload(request)
-      source = object_to_hash(request)
-      {
-        'method' => source['method'] || 'UNKNOWN',
-        'path' => source['path'] || '/',
-        'query' => @redactor.redact_value(source['query'] || {}),
-        'headers' => sanitized_headers(source['headers'] || {}),
-        'body' => @redactor.redact_value(source['body'] || {})
-      }
-    end
-
-    def response_payload(response)
-      source = object_to_hash(response)
-      {
-        'status_code' => source['status_code'] || source['status'] || 0,
-        'headers' => sanitized_headers(source['headers'] || {}),
-        'body' => @redactor.redact_value(source['body'] || {})
-      }
-    end
-
-    def runtime_payload = Runtime.payload
-
-    def exception_causes(error)
-      causes = []
-      current = error.cause
-
-      while current
-        causes << {
-          'name' => current.class.name,
-          'message' => current.message.to_s,
-          'stack' => Array(current.backtrace).join("\n")
-        }
-        current = current.cause
-      end
-
-      causes
-    end
-
-    def probe_snapshot
-      items = @probe_buffers.values.flatten.map do |entry|
-        entry.merge('activation_id' => nil)
-      end
-      return {} if items.empty?
-
-      { 'version' => 1, 'items' => items }
-    end
-
-    def enqueue_event(event)
-      return unless sampled_in?
-
-      @buffer_mutex.synchronize do
-        @buffer << event
-        @buffer.shift while @buffer.length > MAX_BUFFER_SIZE
-      end
-    end
-
-    def buffered_batch
-      @buffer_mutex.synchronize { @buffer.dup }
-    end
-
-    def remove_buffered_events(events)
-      event_ids = events.map { |event| event['event_id'] }
-      @buffer_mutex.synchronize do
-        @buffer.reject! { |event| event_ids.include?(event['event_id']) }
-      end
-    end
-
-    def sampled_in?
-      return false if config.sample_rate <= 0.0
-      return true if config.sample_rate >= 1.0
-
-      @random_provider.call.to_f < config.sample_rate
-    rescue StandardError
-      true
-    end
-
-    def append_suppression_aggregates
-      @suppression.drain_aggregates(now: monotonic_now).each do |aggregate|
-        enqueue_event(base_event('error_suppressed', aggregate, {}))
-      end
-    end
-
-    def base_event(event_type, payload, context)
-      event = {
-        'schema_version' => SCHEMA_VERSION,
-        'event_id' => SecureRandom.uuid,
-        'event_type' => event_type,
-        'project_token' => config.project_token,
-        'sdk_name' => SDK_NAME,
-        'sdk_version' => DebugBundle::VERSION,
-        'service' => {
-          'name' => service_name,
-          'runtime' => 'ruby',
-          'framework' => context['framework'],
-          'environment' => environment_name
-        },
-        'occurred_at' => now.iso8601,
-        'correlation' => correlation_payload(context),
-        'payload' => @redactor.redact_value(payload)
-      }
-      envelope_context = event_context(context)
-      event['context'] = envelope_context unless envelope_context.empty?
-      event
-    end
-
-    def service_name = config.service || DEFAULT_SERVICE_NAME
-
-    def environment_name = config.environment || DEFAULT_ENVIRONMENT
-
-    def correlation_payload(context)
-      request = object_to_hash(context['request'])
-      correlation = object_to_hash(context['correlation'])
-      {
-        'request_id' => correlation['request_id'] || request['request_id'] || context['request_id'],
-        'trace_id' => correlation['trace_id'] || request['trace_id'] || context['trace_id'],
-        'session_id' => correlation['session_id'] || context['session_id'],
-        'user_id_hash' => correlation['user_id_hash'] || context['user_id_hash']
-      }
-    end
-
-    def event_context(context)
-      object_to_hash(context).except(
-        'request',
-        'response',
-        'correlation',
-        'request_id',
-        'trace_id',
-        'session_id',
-        'user_id_hash'
-      )
-    end
-
-    def object_to_hash(value)
-      case value
-      when Hash
-        stringify_hash(value)
-      else
-        if value.respond_to?(:to_h)
-          stringify_hash(value.to_h)
-        elsif value.respond_to?(:to_hash)
-          stringify_hash(value.to_hash)
-        else
-          {}
-        end
-      end
-    rescue StandardError
-      {}
-    end
-
-    def sanitized_headers(headers)
-      stringify_hash(headers).each_with_object({}) do |(key, value), result|
-        normalized_key = key.to_s.downcase
-        next unless DEFAULT_HEADER_ALLOWLIST.include?(normalized_key)
-
-        result[normalized_key] = @redactor.redact_value(value)
-      end
-    end
-
-    def normalize_level(level)
-      candidate = level.to_s.strip.downcase.to_sym
-      return candidate if LOG_LEVEL_RANKS.key?(candidate)
-
-      :warning
-    end
-
-    def level_enabled?(level)
-      threshold = [normalize_level(config.log_level), policy_log_level].max_by { |entry| LOG_LEVEL_RANKS.fetch(entry) }
-      LOG_LEVEL_RANKS.fetch(level) >= LOG_LEVEL_RANKS.fetch(threshold)
-    end
-
-    def policy_log_level
-      case @capture_policy.capture_logs
-      when 'off'
-        :fatal
-      when 'error'
-        :error
-      when 'info'
-        :info
-      else
-        :warning
-      end
     end
 
     def capture_request_event?(status_code, request)
@@ -667,15 +541,12 @@ module DebugBundle
     end
 
     def emit_probe_events(label, data, matching_directives)
-      allowed_directives = if @capture_policy.capture_probe_events == 'standalone_when_activated'
-                             matching_directives
-                           else
-                             matching_request_trigger_directives(label)
-                           end
-      return if allowed_directives.empty?
+      request_directives = matching_request_trigger_directives(label)
+      candidate_directives = (matching_directives + request_directives).uniq(&:id)
+      return if candidate_directives.empty?
 
-      allowed_directives.each do |directive|
-        enqueue_event(
+      candidate_directives.each do |directive|
+        event = apply_before_send(
           base_event(
             'probe_event',
             {
@@ -687,6 +558,9 @@ module DebugBundle
             {}
           )
         )
+        allowed = request_directives.include?(directive) ||
+                  @capture_policy.capture_probe_events == 'standalone_when_activated'
+        enqueue_event(event) if event && allowed
       end
     end
 
@@ -729,7 +603,7 @@ module DebugBundle
     end
 
     def capture_thread_exception(error)
-      capture_exception(error, handled: false)
+      capture_exception_internal(error, context: nil, handled: false, run_before_send: false)
       flush
     rescue StandardError
       nil

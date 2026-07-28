@@ -39,7 +39,8 @@ module DebugBundle
                 :max_probe_labels,
                 :max_probe_entries_per_label,
                 :probe_flush_on_error,
-                :probes_poll_interval
+                :probes_poll_interval,
+                :before_send
 
     def initialize(
       project_token: nil,
@@ -61,7 +62,8 @@ module DebugBundle
       max_probe_labels: DEFAULT_MAX_PROBE_LABELS,
       max_probe_entries_per_label: DEFAULT_MAX_PROBE_ENTRIES_PER_LABEL,
       probe_flush_on_error: DEFAULT_PROBE_FLUSH_ON_ERROR,
-      probes_poll_interval: DEFAULT_PROBES_POLL_INTERVAL
+      probes_poll_interval: DEFAULT_PROBES_POLL_INTERVAL,
+      before_send: nil
     )
       @project_token = project_token
       @enabled = enabled
@@ -89,6 +91,7 @@ module DebugBundle
       )
       @probe_flush_on_error = probe_flush_on_error
       @probes_poll_interval = normalize_positive_number(probes_poll_interval, DEFAULT_PROBES_POLL_INTERVAL)
+      @before_send = before_send.respond_to?(:call) ? before_send : nil
       freeze
     end
 

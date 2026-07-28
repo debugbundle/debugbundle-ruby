@@ -117,6 +117,104 @@ RSpec.describe DebugBundle::Client do
     expect(flushed_events.count { |event| event.fetch('event_type') == 'error_suppressed' }).to eq(1)
   end
 
+  it 'wraps list, scalar, and nil probe data before exception attachment' do
+    client = described_class.new(project_token: 'dbundle_proj_test', transport: transport)
+    client.probe('list', %w[first second])
+    client.probe('scalar', 42)
+    client.probe('nil', nil)
+    client.capture_exception(RuntimeError.new('boom'))
+
+    client.flush
+
+    exception = transport_events.fetch(0).fetch(:events).find do |event|
+      event.fetch('event_type') == 'backend_exception'
+    end
+    items = exception.fetch('payload').fetch('probe_data').fetch('items')
+    expect(items.map { |item| item.fetch('data') }).to eq(
+      [
+        { 'value' => %w[first second] },
+        { 'value' => 42 },
+        { 'value' => nil }
+      ]
+    )
+  end
+
+  it 'swallows probe callback failures' do
+    client = described_class.new(project_token: 'dbundle_proj_test', transport: transport)
+
+    expect { client.probe('unsafe') { raise 'callback failed' } }.not_to raise_error
+  end
+
+  it 'runs before_send after redaction and mutates before queueing' do
+    observed_passwords = []
+    client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: transport,
+      before_send: lambda do |event|
+        observed_passwords << event.fetch('context').fetch('password')
+        event.fetch('payload')['message'] = 'mutated'
+        event
+      end
+    )
+    client.capture_message('original', level: :error, context: { password: 'secret' })
+
+    client.flush
+
+    expect(observed_passwords).to eq(['[REDACTED]'])
+    expect(transport_events.fetch(0).fetch(:events).fetch(0).dig('payload', 'message')).to eq('mutated')
+  end
+
+  it 'handles before_send drop, invalid return, failure, and sampling safely' do
+    calls = 0
+    dropping_client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: transport,
+      before_send: lambda do |_event|
+        calls += 1
+        nil
+      end
+    )
+    dropping_client.capture_message('drop', level: :error)
+    dropping_client.flush
+    expect(calls).to eq(1)
+    expect(transport_events).to be_empty
+
+    invalid_client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: transport,
+      before_send: ->(_event) { { 'invalid' => true } }
+    )
+    invalid_client.capture_message('preserve invalid', level: :error)
+    invalid_client.flush
+
+    failing_client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: transport,
+      before_send: ->(_event) { raise 'hook failed' }
+    )
+    failing_client.capture_message('preserve failure', level: :error)
+    failing_client.flush
+
+    expect(transport_events.map { |request| request.fetch(:events).fetch(0).dig('payload', 'message') }).to eq(
+      ['preserve invalid', 'preserve failure']
+    )
+
+    sampled_calls = 0
+    sampled_client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: transport,
+      sample_rate: 0,
+      before_send: lambda do |event|
+        sampled_calls += 1
+        event
+      end
+    )
+    sampled_client.capture_message('sampled out', level: :error)
+    sampled_client.flush
+    expect(sampled_calls).to eq(1)
+    expect(transport_events.length).to eq(2)
+  end
+
   it 'backs off after 429 responses without dropping buffered events' do
     retry_transport = Class.new do
       def initialize
@@ -145,6 +243,104 @@ RSpec.describe DebugBundle::Client do
     current_time += 2
     expect(client.flush).to be(true)
     expect(client.buffered_event_count).to eq(0)
+  end
+
+  it 'retries only the indexed retryable rejection from an acknowledgement' do
+    requests = []
+    responses = [
+      DebugBundle::Transport::Result.new(
+        status_code: 202,
+        body: {
+          'accepted' => 1,
+          'rejected' => 1,
+          'errors' => [{ 'index' => 1, 'reason' => 'rate_limited' }]
+        }
+      ),
+      DebugBundle::Transport::Result.new(
+        status_code: 202,
+        body: { 'accepted' => 1, 'rejected' => 0, 'errors' => [] }
+      )
+    ]
+    acknowledgement_transport = lambda do |request|
+      requests << request
+      responses.shift
+    end
+    current_time = Time.utc(2026, 5, 23, 12, 0, 0)
+    client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: acknowledgement_transport,
+      time_provider: -> { current_time }
+    )
+    client.capture_log('accepted', level: :warning)
+    client.capture_log('retry', level: :warning)
+
+    expect(client.flush).to be(false)
+    expect(client.buffered_event_count).to eq(1)
+    expect(client.last_event_at).not_to be_nil
+    expect(client.status).to eq(:degraded)
+
+    current_time += 2
+    expect(client.flush).to be(true)
+    expect(requests.fetch(1).fetch(:events).map { |event| event.dig('payload', 'message') }).to eq(['retry'])
+  end
+
+  it 'removes terminal rejections without reporting delivery success' do
+    calls = 0
+    acknowledgement_transport = lambda do |_request|
+      calls += 1
+      DebugBundle::Transport::Result.new(
+        status_code: 202,
+        body: {
+          'accepted' => 0,
+          'rejected' => 1,
+          'errors' => [{ 'index' => 0, 'reason' => 'capture_policy_rejected' }]
+        }
+      )
+    end
+    client = described_class.new(project_token: 'dbundle_proj_test', transport: acknowledgement_transport)
+    client.capture_log('terminal', level: :warning)
+
+    expect(client.flush).to be(false)
+    expect(client.buffered_event_count).to eq(0)
+    expect(client.last_event_at).to be_nil
+    expect(client.status).to eq(:disconnected)
+    expect(client.flush).to be(true)
+    expect(calls).to eq(1)
+  end
+
+  it 'retains the full batch after an inconsistent acknowledgement' do
+    requests = []
+    responses = [
+      DebugBundle::Transport::Result.new(
+        status_code: 202,
+        body: { 'accepted' => 1, 'rejected' => 0, 'errors' => [] }
+      ),
+      DebugBundle::Transport::Result.new(
+        status_code: 202,
+        body: { 'accepted' => 2, 'rejected' => 0, 'errors' => [] }
+      )
+    ]
+    acknowledgement_transport = lambda do |request|
+      requests << request
+      responses.shift
+    end
+    current_time = Time.utc(2026, 5, 23, 12, 0, 0)
+    client = described_class.new(
+      project_token: 'dbundle_proj_test',
+      transport: acknowledgement_transport,
+      time_provider: -> { current_time }
+    )
+    client.capture_log('first', level: :warning)
+    client.capture_log('second', level: :warning)
+
+    expect(client.flush).to be(false)
+    expect(client.buffered_event_count).to eq(2)
+    expect(client.last_event_at).to be_nil
+    expect(client.status).to eq(:degraded)
+
+    current_time += 2
+    expect(client.flush).to be(true)
+    expect(requests.fetch(1).fetch(:events).length).to eq(2)
   end
 
   it 'defaults development captures to secure local event files' do

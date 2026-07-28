@@ -109,7 +109,7 @@ class MockIngestionServer
         }
       }]
     elsif method == 'POST' && path == '/v1/events'
-      [202, { accepted: 1, rejected: 0 }]
+      [202, { accepted: 1, rejected: 0, errors: [] }]
     else
       [404, { error: 'not_found' }]
     end
