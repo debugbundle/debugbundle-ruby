@@ -79,7 +79,7 @@ class MockIngestionServer
       )
     end
 
-    status, body = response_for(method, path)
+    status, body = response_for(method, path, parsed_body)
     payload = JSON.generate(body)
     socket.write("HTTP/1.1 #{status} #{reason_phrase(status)}\r\n")
     socket.write("Content-Type: application/json\r\n")
@@ -93,7 +93,7 @@ class MockIngestionServer
     socket.close
   end
 
-  def response_for(method, path)
+  def response_for(method, path, parsed_body)
     if method == 'GET' && path == '/v1/sdk/config'
       [200, {
         probes_enabled: true,
@@ -109,7 +109,9 @@ class MockIngestionServer
         }
       }]
     elsif method == 'POST' && path == '/v1/events'
-      [202, { accepted: 1, rejected: 0, errors: [] }]
+      events = parsed_body['events']
+      accepted = events.is_a?(Array) ? events.length : 0
+      [202, { accepted: accepted, rejected: 0, errors: [] }]
     else
       [404, { error: 'not_found' }]
     end
