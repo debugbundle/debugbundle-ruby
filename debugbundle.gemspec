@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.summary = 'DebugBundle SDK for Ruby'
   spec.description = 'Production-ready error, request, log, and probe capture for Ruby services.'
   spec.homepage = 'https://debugbundle.com/docs/sdks/ruby'
-  spec.license = 'AGPL-3.0-only'
+  spec.license = 'Apache-2.0'
   spec.required_ruby_version = '>= 3.1'
 
   spec.metadata = {
@@ -21,7 +21,7 @@ Gem::Specification.new do |spec|
     'rubygems_mfa_required' => 'true'
   }
 
-  spec.files = Dir.glob('{lib,spec}/**/*') + %w[Gemfile Makefile README.md debugbundle.gemspec]
+  spec.files = Dir.glob('{lib,spec}/**/*') + %w[Gemfile Makefile README.md LICENSE debugbundle.gemspec]
   spec.bindir = 'exe'
   spec.require_paths = ['lib']
 

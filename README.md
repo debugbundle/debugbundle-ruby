@@ -314,7 +314,7 @@ This repository also ships a clean-install app-driven smoke harness that validat
 
 ```sh
 make smoke
-make smoke-published VERSION=1.3.0
+make smoke-published VERSION=1.4.0
 ```
 
 `make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields.
@@ -357,4 +357,4 @@ The repository ships a GitHub Actions release workflow at `.github/workflows/rel
 
 ## License
 
-AGPL-3.0-only. See LICENSE.
+Apache-2.0. See LICENSE.
