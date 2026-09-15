@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1] - 2026-09-15
+
+### Fixed
+
+- Respect stdlib Logger levels, disabled output and Rails silence. Capture `add` and `log` without evaluating lazy blocks when suppressed or evaluating accepted blocks twice.
+- Preserve native output, return values, message values and application exceptions; isolate SDK callback failures and recursive logging.
+
 ## [1.4.0] - 2026-09-12
 
 ### Changed

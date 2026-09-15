@@ -15,6 +15,12 @@ BUNDLE_ENV = BUNDLE_GEMFILE="$(BUNDLE_GEMFILE)"
 .PHONY: bundle-install test lint build shell compat-rack compat-rails compat-sidekiq compat
 .PHONY: smoke
 .PHONY: smoke-published
+.PHONY: test-focused check-docker
+check-docker:
+	docker run --rm -v "$(CURDIR):$(WORKDIR)" -w "$(WORKDIR)" $(RUBY_IMAGE) sh -lc 'BUNDLE_PATH=vendor/bundle bundle exec rubocop && BUNDLE_PATH=vendor/bundle bundle exec rspec && gem build debugbundle.gemspec'
+
+test-focused:
+	docker run --rm -v "$(CURDIR):$(WORKDIR)" -w "$(WORKDIR)" $(RUBY_IMAGE) sh -lc 'BUNDLE_PATH=vendor/bundle SIMPLECOV_MINIMUM_COVERAGE=0 bundle exec rspec $(TEST_FILES)'
 
 bundle-install:
 	$(DOCKER_RUN) sh -lc "$(BUNDLE_ENV) bundle config set path vendor/bundle && $(BUNDLE_ENV) bundle install"

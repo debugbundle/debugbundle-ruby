@@ -4,6 +4,90 @@ require 'spec_helper'
 require 'stringio'
 
 RSpec.describe 'stdlib logger integration' do
+  def instrument_logger(logger, &capture)
+    client = Object.new
+    client.define_singleton_method(:capture_log, &capture)
+    DebugBundle::Logging.install_stdlib_logger(logger, client: client)
+  end
+
+  it 'respects the current logger level without evaluating suppressed blocks' do
+    output = StringIO.new
+    logger = Logger.new(output, level: Logger::ERROR)
+    captured = []
+    instrument_logger(logger) { |message, **_options| captured << message }
+    evaluations = 0
+    result = logger.warn do
+      evaluations += 1
+      'suppressed'
+    end
+    expect(result).to be(true)
+    expect(captured).to be_empty
+    expect(evaluations).to eq(0)
+    logger.level = Logger::WARN
+    logger.warn do
+      evaluations += 1
+      'accepted'
+    end
+    expect(evaluations).to eq(1)
+    expect(captured).to eq(['accepted'])
+    expect(output.string).to include('accepted')
+    expect(output.string).not_to include('suppressed')
+  end
+
+  it 'preserves logger message and progname semantics and evaluates accepted blocks once' do
+    output = StringIO.new
+    logger = Logger.new(output, progname: 'default-name')
+    captured = []
+    instrument_logger(logger) { |message, **_options| captured << message }
+    logger.add(Logger::WARN)
+    logger.add(Logger::WARN, nil, 'message-as-progname')
+    logger.add(nil, 'unknown-severity')
+    evaluations = 0
+    logger.warn('explicit-name') do
+      evaluations += 1
+      "block-#{evaluations}"
+    end
+    expect(captured).to eq(%w[default-name message-as-progname unknown-severity block-1])
+    expect(evaluations).to eq(1)
+    expect(output.string).to include('explicit-name: block-1')
+  end
+
+  it 'does not evaluate blocks or capture when the logger has no output device' do
+    logger = Logger.new(nil)
+    instrument_logger(logger) { raise 'should not capture' }
+    expect(logger.warn { raise 'should not evaluate' }).to be(true)
+  end
+
+  it 'captures the log alias and preserves false messages and Rails silence' do
+    require 'active_support'
+    require 'active_support/logger'
+    output = StringIO.new
+    logger = ActiveSupport::Logger.new(output)
+    captured = []
+    instrument_logger(logger) { |message, **_options| captured << message }
+    logger.silence(Logger::ERROR) { logger.warn { raise 'suppressed block' } }
+    logger.log(Logger::WARN, false)
+    expect(captured).to eq(['false'])
+    expect(output.string).to include('false')
+  end
+
+  it 'isolates capture failures and recursion while preserving application logging failures' do
+    output = StringIO.new
+    logger = Logger.new(output)
+    calls = 0
+    instrument_logger(logger) do |_message, **_options|
+      calls += 1
+      logger.warn('nested')
+      raise 'capture failed'
+    end
+    expect { logger.warn('outer') }.not_to raise_error
+    expect(calls).to eq(1)
+    expect(output.string).to include('outer', 'nested')
+    expect { logger.warn { raise 'application failure' } }.to raise_error('application failure')
+    expect { logger.warn('after failure') }.not_to raise_error
+    expect(calls).to eq(2)
+  end
+
   it 'captures log events without changing logger output' do
     transport_events = []
     transport = Class.new do

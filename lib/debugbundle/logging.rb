@@ -16,29 +16,43 @@ module DebugBundle
 
     def self.install_stdlib_logger(logger, client:)
       interceptor = Module.new do
-        define_method(:add) do |severity, message = nil, progname = nil, &block|
-          was_capturing = Thread.current[RECURSION_GUARD_KEY]
-          unless was_capturing
-            Thread.current[RECURSION_GUARD_KEY] = true
+        %i[add log].each do |method_name|
+          define_method(method_name) do |severity, message = nil, progname = nil, &block|
+            normalized_severity = severity || ::Logger::UNKNOWN
+            # Match Logger's early return, including Rails' thread-local level.
+            disabled = normalized_severity < level || (is_a?(::Logger) && instance_variable_get(:@logdev).nil?)
+            next super(severity, message, progname, &block) if disabled || Thread.current[RECURSION_GUARD_KEY]
+
             resolved_message = message
-            resolved_message = block.call if resolved_message.nil? && block
-            resolved_message = progname if resolved_message.nil?
-
-            client.capture_log(
-              resolved_message.to_s,
-              level: LOGGER_LEVEL_NAMES.fetch(severity || ::Logger::UNKNOWN, :warning),
-              context: { logger_name: logger.progname }
-            )
+            resolved_message = progname.nil? ? self.progname : progname if message.nil?
+            result = if message.nil? && block
+                       super(severity, message, progname) { resolved_message = block.call }
+                     else
+                       super(severity, message, progname)
+                     end
+            DebugBundle::Logging.capture_stdlib(client, resolved_message, normalized_severity, self.progname)
+            result
           end
-
-          super(severity, message, progname, &block)
-        ensure
-          Thread.current[RECURSION_GUARD_KEY] = was_capturing
         end
       end
 
       logger.singleton_class.prepend(interceptor)
       interceptor
+    end
+
+    def self.capture_stdlib(client, message, severity, progname)
+      was_capturing = Thread.current[RECURSION_GUARD_KEY]
+      Thread.current[RECURSION_GUARD_KEY] = true
+      client.capture_log(
+        message.to_s,
+        level: LOGGER_LEVEL_NAMES.fetch(severity, :warning),
+        context: { logger_name: progname }
+      )
+    rescue StandardError
+      # SDK failures must not change the result of the application's logger.
+      nil
+    ensure
+      Thread.current[RECURSION_GUARD_KEY] = was_capturing
     end
 
     def self.install_semantic_logger(client:)

@@ -4,6 +4,10 @@ Ruby SDK for DebugBundle.
 
 Use this gem to capture Ruby backend exceptions, request metadata, structured logs, runtime context, probe data, and browser relay traffic. It supports a singleton facade plus instance clients for Rack, Rails, Sidekiq, and explicit Ruby instrumentation.
 
+## Automatic capture and application filtering
+
+`capture_logger(logger)` respects the logger level, Rails silence and disabled output. Lazy message blocks are evaluated by the native logger: zero times when suppressed and once when accepted. Native return values and application block exceptions are preserved. DebugBundle applies its own configured minimum capture level after the logger accepts a message.
+
 ## Installation
 
 ```ruby
@@ -314,7 +318,7 @@ This repository also ships a clean-install app-driven smoke harness that validat
 
 ```sh
 make smoke
-make smoke-published VERSION=1.4.0
+make smoke-published VERSION=1.4.1
 ```
 
 `make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields.
