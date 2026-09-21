@@ -21,7 +21,7 @@ Gem::Specification.new do |spec|
     'rubygems_mfa_required' => 'true'
   }
 
-  spec.files = Dir.glob('{lib,spec}/**/*') + %w[Gemfile Makefile README.md LICENSE debugbundle.gemspec]
+  spec.files = Dir.glob('lib/**/*') + %w[README.md LICENSE]
   spec.bindir = 'exe'
   spec.require_paths = ['lib']
 

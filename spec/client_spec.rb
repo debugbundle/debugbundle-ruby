@@ -19,6 +19,28 @@ RSpec.describe DebugBundle::Client do
     end.new(transport_events)
   end
 
+  it 'protects context, hook input, final buffer and transport bytes' do
+    seen = nil
+    client = described_class.new(
+      project_token: 'dbundle_proj_test', service: 'checkout-api', environment: 'production', transport: transport,
+      before_send: lambda do |event|
+        seen = Marshal.load(Marshal.dump(event))
+        event['payload']['message'] = 'token=SYNTHETIC_HOOK_SECRET'
+        event
+      end
+    )
+    client.set_context('user_password', 'SYNTHETIC_CONTEXT_SECRET')
+    client.capture_log('Authorization: Bearer SYNTHETIC_CAPTURE_SECRET', level: :error, context: { 'safe' => 'ok' })
+    client.flush
+
+    expect(JSON.generate(seen)).not_to include('SYNTHETIC_')
+    event = transport_events.fetch(0).fetch(:events).fetch(0)
+    expect(event.fetch('context')).to include('user_password' => '[REDACTED]')
+    expect(event.fetch('payload').fetch('message')).to eq('token=[REDACTED]')
+    expect(JSON.generate(event)).not_to include('SYNTHETIC_')
+    expect(event.fetch('project_token')).to eq('dbundle_proj_test')
+  end
+
   it 'buffers and flushes canonical events' do
     client = described_class.new(
       project_token: 'dbundle_proj_test',

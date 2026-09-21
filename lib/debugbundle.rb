@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'debugbundle/redaction'
+require_relative 'debugbundle/telemetry_privacy'
 require_relative 'debugbundle/acknowledgement'
 require_relative 'debugbundle/before_send'
 require_relative 'debugbundle/rack/middleware'

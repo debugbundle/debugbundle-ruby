@@ -74,21 +74,46 @@ module DebugBundle
       end
 
       def normalize_probe_data(value)
-        redacted = @redactor.redact_value(value)
+        redacted = TelemetryPrivacy.protect(@redactor.redact_value(value), additional_fields: config.redact_fields)
         redacted.is_a?(Hash) ? redacted : { 'value' => redacted }
+      rescue StandardError
+        { 'value' => '[REDACTED]' }
       end
 
       def apply_before_send(event)
-        BeforeSend.apply(event, config.before_send)
+        protected = protect_event(event)
+        return nil unless protected
+
+        prepared = BeforeSend.apply(protected, config.before_send)
+        prepared && protect_event(prepared)
       end
 
       def enqueue_event(event)
+        event = protect_event(event)
+        return unless event
         return unless sampled_in?
 
         @buffer_mutex.synchronize do
           @buffer << event
           @buffer.shift while @buffer.length > MAX_BUFFER_SIZE
         end
+      end
+
+      def protect_event(event)
+        return nil unless TelemetryPrivacy.safe_event_identity?(event, additional_fields: config.redact_fields)
+
+        fields = TelemetryPrivacy.protect(
+          { 'service' => event['service'], 'payload' => event['payload'], 'context' => event['context'] },
+          additional_fields: config.redact_fields
+        )
+        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
+        return nil unless fields['service']['name'].is_a?(String) && fields['service']['environment'].is_a?(String)
+
+        event.merge('service' => fields['service'], 'payload' => fields['payload']).tap do |protected|
+          protected['context'] = fields['context'] if event.key?('context')
+        end
+      rescue StandardError
+        nil
       end
 
       def buffered_batch

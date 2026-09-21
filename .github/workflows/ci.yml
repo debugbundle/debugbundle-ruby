@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby-version: ["3.1", "3.2", "3.3", "3.4"]
+        ruby-version: ["3.1", "3.2", "3.3", "3.4", "4.0"]
     steps:
       - uses: actions/checkout@v6
       - uses: ruby/setup-ruby@v1
@@ -34,6 +34,10 @@ jobs:
             ruby-version: '3.2'
             gemfile: gemfiles/rails_7_1.gemfile
             command: bundle exec rspec spec/rails_relay_spec.rb spec/rails_railtie_spec.rb
+          - name: rails-8.1
+            ruby-version: '4.0'
+            gemfile: gemfiles/rails_8_1.gemfile
+            command: bundle exec rspec spec/rails_relay_spec.rb spec/rails_railtie_spec.rb spec/rack_middleware_spec.rb
           - name: rack-2.2
             ruby-version: '3.1'
             gemfile: gemfiles/rack_2_2.gemfile

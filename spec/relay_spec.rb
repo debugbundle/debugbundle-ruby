@@ -30,6 +30,27 @@ RSpec.describe DebugBundle::Relay::Handler do
     }
   end
 
+  it 'scrubs legacy browser evidence before local relay files' do
+    Dir.mktmpdir do |directory|
+      handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',
+                                    local_events_dir: directory)
+      event = browser_event.merge('payload' => {
+                                    'message' => 'password=SYNTHETIC_RELAY_SECRET',
+                                    'data' => { 'apiKey' => 'SYNTHETIC_NESTED_SECRET' }
+                                  })
+      response = handler.handle(
+        method: 'POST', headers: { 'host' => 'app.example.com', 'origin' => 'https://app.example.com',
+                                   'content-type' => 'application/json' },
+        body: JSON.generate('batch' => [event]), ip_address: '127.0.0.1'
+      )
+
+      expect(response.status).to eq(202)
+      stored = File.read(File.join(directory, Dir.children(directory).first))
+      expect(stored).not_to include('SYNTHETIC_')
+      expect(JSON.parse(stored).fetch(0).fetch('payload')).to include('message' => 'password=[REDACTED]')
+    end
+  end
+
   it 'validates, sanitizes, and writes local-only relay batches' do
     Dir.mktmpdir do |directory|
       handler = described_class.new(project_mode: :local_only, project_token: 'dbundle_proj_server',

@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require 'cgi'
+require 'uri'
 
 module DebugBundle
   module Rack
@@ -65,9 +65,19 @@ module DebugBundle
       end
 
       def parse_query(query_string)
-        CGI.parse(query_string.to_s).transform_values do |values|
-          values.length == 1 ? values.first : values
+        raw_query = query_string.to_s
+        return {} if raw_query.bytesize > 16_384
+
+        URI.decode_www_form(raw_query.tr(';', '&')).each_with_object({}) do |(key, value), result|
+          result[key] = if result.key?(key)
+                          Array(result[key]) << value
+                        else
+                          value
+                        end
         end
+      rescue StandardError
+        # Broken request metadata must never interrupt the host application.
+        {}
       end
 
       def route_template(env)

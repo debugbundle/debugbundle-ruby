@@ -182,7 +182,7 @@ module DebugBundle
         payload = candidate['payload']
         return nil unless service.is_a?(Hash) && payload.is_a?(Hash)
 
-        {
+        sanitized = {
           'schema_version' => candidate['schema_version'].to_s,
           'event_id' => candidate['event_id'].to_s,
           'event_type' => event_type,
@@ -197,6 +197,14 @@ module DebugBundle
           'payload' => payload,
           'project_token' => @project_token
         }
+        return nil unless TelemetryPrivacy.safe_event_identity?(sanitized)
+
+        fields = TelemetryPrivacy.protect({ 'service' => sanitized['service'], 'payload' => sanitized['payload'] })
+        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
+
+        sanitized.merge('service' => fields['service'], 'payload' => fields['payload'])
+      rescue StandardError
+        nil
       end
 
       def sanitize_correlation(value, event_type)

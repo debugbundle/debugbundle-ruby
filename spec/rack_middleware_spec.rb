@@ -53,7 +53,7 @@ RSpec.describe DebugBundle::Rack::Middleware do
     status, headers, body = middleware.call(
       'REQUEST_METHOD' => 'POST',
       'PATH_INFO' => '/checkout',
-      'QUERY_STRING' => 'cart_id=123',
+      'QUERY_STRING' => 'cart_id=123;cart_id=456',
       'HTTP_X_REQUEST_ID' => 'req-1',
       'HTTP_X_DEBUGBUNDLE_TRACE_ID' => 'trace-1',
       'HTTP_AUTHORIZATION' => 'Bearer secret',
@@ -69,9 +69,19 @@ RSpec.describe DebugBundle::Rack::Middleware do
     expect(event.fetch('event_type')).to eq('request_event')
     expect(event.fetch('correlation')).to include('request_id' => 'req-1', 'trace_id' => 'trace-1')
     expect(event.fetch('payload').fetch('headers')).to include('user-agent' => 'RSpec')
+    expect(event.fetch('payload').fetch('query')).to include('cart_id' => %w[123 456])
     expect(event.fetch('payload').fetch('headers')).not_to have_key('authorization')
     expect(event.fetch('payload').fetch('response_headers')).to include('content-type' => 'application/json')
     expect(event.fetch('payload').fetch('response_headers')).not_to have_key('set-cookie')
+  end
+
+  it 'keeps requests running when query metadata is oversized or malformed' do
+    middleware = described_class.new(->(_env) { [204, {}, []] }, client: client)
+
+    ["token=#{'x' * 20_000}", 'token=%ZZ'].each do |query|
+      status, = middleware.call('REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/health', 'QUERY_STRING' => query)
+      expect(status).to eq(204)
+    end
   end
 
   it 'captures exceptions and re-raises them' do

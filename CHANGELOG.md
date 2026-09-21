@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.5.0] - 2026-09-21
+
+### Security
+
+- Enforce mandatory bounded privacy checks across context, `before_send`, buffers, transport, and Rack or Rails browser relays. Application custom keys add to the baseline.
+
+### Changed
+
+- Keep Rack request capture compatible with Ruby 4.0 and Rails 8.1 after removal of `CGI.parse`, bound query parsing, and exclude test and development files from the built gem.
+
 ## [1.4.1] - 2026-09-15
 
 ### Fixed
@@ -12,8 +24,6 @@
 ### Changed
 
 - License first-party SDK code under Apache-2.0 and ship consistent package licensing metadata and license text.
-
-## Unreleased
 
 ## 1.3.0 - 2026-07-28
 

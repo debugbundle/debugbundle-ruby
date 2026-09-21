@@ -173,6 +173,7 @@ backend_app = Rack::Builder.new do
       level: :error,
       context: {
         feature: 'app-driven-smoke',
+        note: 'password=PACKED_SMOKE_SECRET',
         correlation: correlation
       }
     )
@@ -257,6 +258,9 @@ assert!(
 
 ingestion_requests = captured_requests.select { |entry| entry.http_method == 'POST' && entry.path == '/v1/events' }
 assert!(ingestion_requests.length >= 2, "expected_at_least_two_ingestion_requests_got_#{ingestion_requests.length}")
+
+assert!(ingestion_requests.none? { |request| JSON.generate(request.body).include?('PACKED_SMOKE_SECRET') },
+        'installed_sdk_leaked_privacy_canary')
 
 backend_request, log_event = find_event(ingestion_requests) do |event|
   event['event_type'] == 'log_event' && event.dig('payload', 'message') == 'ruby app-driven smoke message'

@@ -212,7 +212,12 @@ module DebugBundle
     end
 
     def set_context(key, value)
-      @context[key.to_s] = @redactor.redact_value(value)
+      safe = TelemetryPrivacy.protect(
+        { key.to_s => @redactor.redact_value(value) }, additional_fields: config.redact_fields
+      )
+      @context[key.to_s] = safe[key.to_s] if safe.key?(key.to_s)
+      value
+    rescue StandardError
       value
     end
 
@@ -238,17 +243,20 @@ module DebugBundle
       resolved, raw_value = resolve_probe_value(data, block)
       return unless resolved
 
+      safe_label = TelemetryPrivacy.protect(label.to_s, additional_fields: config.redact_fields)
       entry = {
-        'label' => label.to_s,
+        'label' => safe_label,
         'data' => normalize_probe_data(raw_value),
         'timestamp' => now.iso8601
       }
 
-      bucket = (@probe_buffers[label.to_s] ||= [])
+      bucket = (@probe_buffers[safe_label] ||= [])
       bucket << entry
       bucket.shift while bucket.length > config.max_probe_entries_per_label
 
-      emit_probe_events(label.to_s, entry['data'], matching_directives)
+      emit_probe_events(safe_label, entry['data'], matching_directives)
+    rescue StandardError
+      nil
     end
 
     def capture_exceptions
