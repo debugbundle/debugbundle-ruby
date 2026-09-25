@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-25
+
+### Changed
+
+- Reject logs against local and remote levels before event construction or `before_send`; `capture_logs: off` excludes FATAL too.
+- Run remote configuration on a separate bounded poller so a stalled config fetch cannot hold delivery. Run `before_send`, automatic batch/interval delivery, and local file or HTTP transport on one owned sender thread. Explicit `flush` waits at most five seconds for the sender and returns `false` if it cannot complete.
+- Bound combined queued/in-flight ownership and cached hook replacements to 1,000 entries and 8 MiB. Held transport work cannot be displaced; exceptions and failed requests may evict only unsent lower-priority work. Emit bounded queue-pressure aggregates after capacity returns. A saturated all-ERROR or all-exception queue rejects excess records before reading their application messages or building events.
+- Reinitialize the sender and discard inherited parent capture state after a fork. Automatic exception hooks wake the sender without waiting for stalled delivery.
+- Read the stored exception type, message, backtrace, and cause through Ruby's built-in accessors so application overrides cannot block or raise through capture. Retain at most eight causes, 64 stack frames, and 16,384 stack characters per exception.
+- Avoid application-defined `to_s` during accepted log capture. Strings and simple Ruby scalar messages retain their values; unsupported objects use a fixed placeholder.
+- Avoid application-defined conversion for context keys and values and request-like objects on the capture caller. Unsupported context values use a fixed placeholder, unsupported keys are skipped, and request/response metadata requires a Hash. Bound path-rule normalization to 2,048 characters.
+- Compile one bounded assignment matcher per privacy policy instead of scanning every text once per sensitive field. The full shared privacy corpus and every mandatory assignment label remain protected. Enforce filtered, accepted, configured-privacy, stalled-transport, concurrent-caller, and full-queue timing/resource budgets in CI and the package release workflow.
+- See [MIGRATION-2.0.md](MIGRATION-2.0.md) for hook timing, explicit flush, and overload semantics.
+
 ## [1.5.0] - 2026-09-21
 
 ### Security

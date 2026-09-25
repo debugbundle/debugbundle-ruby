@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'date'
+require 'debugbundle/safe_input'
 
 module DebugBundle
   module Redaction
@@ -8,6 +9,7 @@ module DebugBundle
     CIRCULAR_VALUE = '[Circular]'
     TRUNCATED_DEPTH_VALUE = '[Truncated:depth]'
     TRUNCATED_COLLECTION_VALUE = '[Truncated:collection]'
+    UNSUPPORTED_VALUE = '[unsupported value]'
     DEFAULT_MAX_DEPTH = 5
     DEFAULT_MAX_STRING_LENGTH = 1_024
     DEFAULT_MAX_ARRAY_LENGTH = 50
@@ -84,13 +86,8 @@ module DebugBundle
           mark_seen(value, seen)
           sanitize_hash(value, depth: depth + 1, seen: seen)
         else
-          if value.respond_to?(:to_h)
-            sanitize(value.to_h, depth: depth + 1, seen: seen)
-          elsif value.respond_to?(:to_hash)
-            sanitize(value.to_hash, depth: depth + 1, seen: seen)
-          else
-            truncate_string(value.to_s)
-          end
+          # Application conversion methods can block or raise on the capture caller.
+          UNSUPPORTED_VALUE
         end
       end
 
@@ -98,7 +95,9 @@ module DebugBundle
         value.each_with_index.with_object({}) do |((key, nested_value), index), result|
           break result if index >= @max_hash_keys
 
-          key_string = key.to_s
+          key_string = SafeInput.key(key)
+          next unless key_string
+
           result[key_string] =
             sensitive_key?(key_string) ? REDACTED_VALUE : sanitize(nested_value, depth: depth, seen: seen)
         end.tap do |result|

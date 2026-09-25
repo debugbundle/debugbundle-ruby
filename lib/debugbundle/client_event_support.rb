@@ -1,11 +1,16 @@
 # frozen_string_literal: true
 
+require 'debugbundle/safe_input'
+
 module DebugBundle
   class Client
     module EventSupport
       private
 
-      def capture_enabled? = config.enabled? && config.configured?
+      def capture_enabled?
+        ensure_current_process!
+        config.enabled? && config.configured?
+      end
 
       def merge_context(context)
         merged = @context.merge(stringify_hash(context || {}))
@@ -16,7 +21,8 @@ module DebugBundle
         return {} unless value.is_a?(Hash)
 
         value.each_with_object({}) do |(key, nested_value), result|
-          result[key.to_s] = nested_value
+          safe_key = SafeInput.key(key)
+          result[safe_key] = nested_value if safe_key
         end
       end
 
@@ -44,18 +50,76 @@ module DebugBundle
 
       def exception_causes(error)
         causes = []
-        current = error.cause
+        current = safe_exception_cause(error)
+        seen = {}.compare_by_identity
+        seen[error] = true
 
-        while current
+        while current && causes.length < 8 && !seen[current]
+          seen[current] = true
           causes << {
-            'name' => current.class.name,
-            'message' => current.message.to_s,
-            'stack' => Array(current.backtrace).join("\n")
+            'name' => safe_exception_name(current),
+            'message' => safe_exception_message(current),
+            'stack' => safe_exception_stack(current)
           }
-          current = current.cause
+          current = safe_exception_cause(current)
         end
 
         causes
+      end
+
+      def safe_exception_message(error)
+        value = Exception.instance_method(:to_s).bind_call(error)
+        value.is_a?(String) ? value[0, 4096] : '[exception message unavailable]'
+      rescue StandardError
+        '[exception message unavailable]'
+      end
+
+      def safe_exception_name(error)
+        type = Object.instance_method(:class).bind_call(error)
+        value = Module.instance_method(:name).bind_call(type)
+        value.is_a?(String) && !value.empty? ? value[0, 256] : 'Exception'
+      rescue StandardError
+        'Exception'
+      end
+
+      def safe_exception_stack(error)
+        frames = Exception.instance_method(:backtrace).bind_call(error)
+        return '' unless frames.is_a?(Array)
+
+        frames.first(64).filter_map { |frame| frame[0, 512] if frame.is_a?(String) }.join("\n")[0, 16_384]
+      rescue StandardError
+        ''
+      end
+
+      def safe_exception_cause(error)
+        Exception.instance_method(:cause).bind_call(error)
+      rescue StandardError
+        nil
+      end
+
+      def safe_log_message(value)
+        is_a = Object.instance_method(:is_a?)
+        return String.instance_method(:[]).bind_call(value, 0, 16_384) if is_a.bind_call(value, String)
+
+        if is_a.bind_call(value, Integer)
+          return '[unsupported log message]' if Integer.instance_method(:bit_length).bind_call(value) > 4096
+
+          return Integer.instance_method(:to_s).bind_call(value)
+        end
+        return Float.instance_method(:to_s).bind_call(value) if is_a.bind_call(value, Float)
+
+        if is_a.bind_call(value, Symbol)
+          return '[unsupported log message]' if Symbol.instance_method(:length).bind_call(value) > 16_384
+
+          return Symbol.instance_method(:to_s).bind_call(value)
+        end
+        return TrueClass.instance_method(:to_s).bind_call(value) if is_a.bind_call(value, TrueClass)
+        return FalseClass.instance_method(:to_s).bind_call(value) if is_a.bind_call(value, FalseClass)
+        return '' if is_a.bind_call(value, NilClass)
+
+        '[unsupported log message]'
+      rescue StandardError
+        '[unsupported log message]'
       end
 
       def probe_snapshot
@@ -88,17 +152,6 @@ module DebugBundle
         prepared && protect_event(prepared)
       end
 
-      def enqueue_event(event)
-        event = protect_event(event)
-        return unless event
-        return unless sampled_in?
-
-        @buffer_mutex.synchronize do
-          @buffer << event
-          @buffer.shift while @buffer.length > MAX_BUFFER_SIZE
-        end
-      end
-
       def protect_event(event)
         return nil unless TelemetryPrivacy.safe_event_identity?(event, additional_fields: config.redact_fields)
 
@@ -116,17 +169,6 @@ module DebugBundle
         nil
       end
 
-      def buffered_batch
-        @buffer_mutex.synchronize { @buffer.dup }
-      end
-
-      def remove_buffered_events(events)
-        event_ids = events.map { |event| event['event_id'] }
-        @buffer_mutex.synchronize do
-          @buffer.reject! { |event| event_ids.include?(event['event_id']) }
-        end
-      end
-
       def sampled_in?
         return false if config.sample_rate <= 0.0
         return true if config.sample_rate >= 1.0
@@ -138,8 +180,7 @@ module DebugBundle
 
       def append_suppression_aggregates
         @suppression.drain_aggregates(now: monotonic_now).each do |aggregate|
-          event = apply_before_send(base_event('error_suppressed', aggregate, {}))
-          enqueue_event(event) if event
+          enqueue_event(base_event('error_suppressed', aggregate, {}))
         end
       end
 
@@ -217,17 +258,7 @@ module DebugBundle
       end
 
       def object_to_hash(value)
-        case value
-        when Hash
-          stringify_hash(value)
-        else
-          return stringify_hash(value.to_h) if value.respond_to?(:to_h)
-          return stringify_hash(value.to_hash) if value.respond_to?(:to_hash)
-
-          {}
-        end
-      rescue StandardError
-        {}
+        value.is_a?(Hash) ? stringify_hash(value) : {}
       end
 
       def sanitized_headers(headers)
@@ -247,6 +278,8 @@ module DebugBundle
       end
 
       def level_enabled?(level)
+        return false if @capture_policy.capture_logs == 'off'
+
         threshold = [normalize_level(config.log_level), policy_log_level].max_by do |entry|
           LOG_LEVEL_RANKS.fetch(entry)
         end

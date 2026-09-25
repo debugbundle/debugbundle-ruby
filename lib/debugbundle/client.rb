@@ -1,19 +1,28 @@
 # frozen_string_literal: true
 
 require 'digest'
+require 'json'
+require 'set'
 require 'time'
-require 'uri'
 
 require 'debugbundle/client_event_support'
+require 'debugbundle/client_process_support'
+require 'debugbundle/client_queue_support'
+require 'debugbundle/config_worker'
+require 'debugbundle/delivery_worker'
 require 'debugbundle/runtime'
 
 module DebugBundle
   class Client
+    include QueueSupport
+    include ProcessSupport
+
     SCHEMA_VERSION = '2026-03-01'
     SDK_NAME = '@debugbundle/sdk-ruby'
     DEFAULT_SERVICE_NAME = 'ruby-service'
     DEFAULT_ENVIRONMENT = 'development'
     MAX_BUFFER_SIZE = 1_000
+    MAX_BUFFER_BYTES = 8 * 1_024 * 1_024
     RETRY_AFTER_CAP_SECONDS = 300
     DEFAULT_HEADER_ALLOWLIST = %w[
       user-agent
@@ -80,6 +89,7 @@ module DebugBundle
     end
 
     def initialize(transport: nil, time_provider: nil, random_provider: nil, config_fetcher: nil, **options)
+      @owner_pid = Process.pid
       @config = Config.new(**options)
       @time_provider = time_provider || -> { Time.now.utc }
       @random_provider = random_provider || -> { rand }
@@ -90,6 +100,14 @@ module DebugBundle
       @config_fetcher = config_fetcher || build_default_config_fetcher(custom_transport: !transport.nil?)
       @context = {}
       @buffer = []
+      @buffer_bytes = 0
+      @buffer_priority_counts = [0, 0, 0, 0]
+      @inflight_event_ids = Set.new
+      @inflight_priority_counts = [0, 0, 0, 0]
+      @event_sizes = {}
+      @pressure_drops = {}
+      @hook_bypass = Set.new
+      @finalized_events = {}
       @buffer_mutex = Mutex.new
       @flush_mutex = Mutex.new
       @probe_buffers = {}
@@ -105,10 +123,22 @@ module DebugBundle
       @next_remote_config_poll_at = nil
       @remote_config_etag = nil
       @remote_config = RemoteConfig::Snapshot.default
-      @capture_policy = @remote_config.capture_policy
+      @capture_policy = @config_fetcher ? RemoteConfig.minimal_capture_policy : @remote_config.capture_policy
+      @initial_remote_config_pending = !@config_fetcher.nil?
+      @config_worker = nil
+      return unless capture_enabled?
 
-      refresh_remote_config!
-      @capture_policy = RemoteConfig.minimal_capture_policy if @config_fetcher && @remote_config_etag.nil?
+      @delivery_worker = DeliveryWorker.new(
+        interval: config.flush_interval,
+        before_work: -> {},
+        &method(:flush_now)
+      )
+      return unless @config_fetcher
+
+      @config_worker = ConfigWorker.new(
+        next_wait_seconds: method(:next_remote_config_wait_seconds),
+        &method(:refresh_remote_config_on_worker)
+      )
     end
 
     def capture_exception(error, context: nil, handled: true)
@@ -117,14 +147,15 @@ module DebugBundle
 
     def capture_exception_internal(error, context:, handled:, run_before_send:)
       return unless capture_enabled?
+      return unless preflight_capacity?(3, 'exception')
 
-      poll_remote_config_if_due!
+      request_remote_config_poll_if_due
 
       merged_context = merge_context(context)
       payload = {
-        'name' => error.class.name,
-        'message' => error.message.to_s,
-        'stack' => Array(error.backtrace).join("\n"),
+        'name' => safe_exception_name(error),
+        'message' => safe_exception_message(error),
+        'stack' => safe_exception_stack(error),
         'handled' => handled,
         'request' => request_payload(merged_context['request']),
         'response' => response_payload(merged_context['response']),
@@ -140,8 +171,6 @@ module DebugBundle
       extra_context['causes'] = causes unless causes.empty?
 
       event = base_event('backend_exception', payload, extra_context)
-      event = apply_before_send(event) if run_before_send
-      return if event.nil?
 
       event_payload = event.fetch('payload')
       suppression_key = [
@@ -152,7 +181,7 @@ module DebugBundle
       ].join(':')
       return unless @suppression.should_capture(suppression_key, now: monotonic_now)
 
-      enqueue_event(event)
+      enqueue_event(event, skip_before_send: !run_before_send)
     end
     private :capture_exception_internal
 
@@ -161,26 +190,39 @@ module DebugBundle
     def capture_log(message, level: :warning, context: nil)
       return unless capture_enabled?
 
-      poll_remote_config_if_due!
-
       normalized_level = normalize_level(level || :warning)
+      return unless level_enabled?(normalized_level)
+
+      priority = LOG_LEVEL_RANKS.fetch(normalized_level) >= LOG_LEVEL_RANKS.fetch(:error) ? 2 : 0
+      return unless preflight_capacity?(priority, normalized_level.to_s)
+
+      request_remote_config_poll_if_due
 
       merged_context = merge_context(context)
       payload = {
         'level' => normalized_level.to_s,
-        'message' => message.to_s,
+        'message' => safe_log_message(message),
         'attributes' => merged_context
       }
-      event = apply_before_send(base_event('log_event', payload, merged_context))
-      return if event.nil? || !level_enabled?(normalized_level)
-
-      enqueue_event(event)
+      enqueue_event(base_event('log_event', payload, merged_context))
     end
 
     def capture_request(request, response, context: nil)
       return unless capture_enabled?
 
-      poll_remote_config_if_due!
+      status = if response.is_a?(Hash)
+                 response[:status_code] || response['status_code'] || response[:status] || response['status']
+               end
+      priority = if status.is_a?(Integer)
+                   status >= 400 ? 2 : 1
+                 elsif response.nil?
+                   1
+                 else
+                   3
+                 end
+      return unless preflight_capacity?(priority, 'request')
+
+      request_remote_config_poll_if_due
 
       merged_context = merge_context(context)
       sanitized_request = request_payload(request)
@@ -199,12 +241,9 @@ module DebugBundle
         'response_headers' => sanitized_response['headers'],
         'response_body' => sanitized_response['body']
       }
-      event = apply_before_send(
-        base_event('request_event', payload, merged_context.merge('request' => sanitized_request))
-      )
-      return if event.nil? || !capture_request_event?(response_status, sanitized_request)
+      return unless capture_request_event?(response_status, sanitized_request)
 
-      enqueue_event(event)
+      enqueue_event(base_event('request_event', payload, merged_context.merge('request' => sanitized_request)))
     end
 
     def capture_message(message, level: nil, context: nil)
@@ -212,10 +251,14 @@ module DebugBundle
     end
 
     def set_context(key, value)
+      ensure_current_process!
+      safe_key = SafeInput.key(key)
+      return value unless safe_key
+
       safe = TelemetryPrivacy.protect(
-        { key.to_s => @redactor.redact_value(value) }, additional_fields: config.redact_fields
+        { safe_key => @redactor.redact_value(value) }, additional_fields: config.redact_fields
       )
-      @context[key.to_s] = safe[key.to_s] if safe.key?(key.to_s)
+      @context[safe_key] = safe[safe_key] if safe.key?(safe_key)
       value
     rescue StandardError
       value
@@ -224,7 +267,7 @@ module DebugBundle
     def probe(label, data = nil, heavy: false, &block)
       return unless capture_enabled?
 
-      poll_remote_config_if_due!
+      request_remote_config_poll_if_due
       return unless @remote_config.probes_enabled
 
       matching_directives = matching_probe_directives(label)
@@ -282,7 +325,9 @@ module DebugBundle
           handled: false,
           run_before_send: false
         )
-        client.flush
+        client.__send__(:wake_sender)
+      rescue StandardError
+        nil
       end
       true
     end
@@ -300,7 +345,7 @@ module DebugBundle
     end
 
     def with_request_trigger(request)
-      poll_remote_config_if_due! if capture_enabled?
+      request_remote_config_poll_if_due if capture_enabled?
 
       directives = TriggerToken.resolve_request_directives(
         request: request,
@@ -352,19 +397,46 @@ module DebugBundle
     end
 
     def flush
+      ensure_current_process!
+      @delivery_worker&.flush || false
+    end
+
+    def close
+      ensure_current_process!
+      @delivery_worker&.close
+      @config_worker&.close
+    end
+
+    def flush_now
       # rubocop:disable Metrics/BlockLength
       @flush_mutex.synchronize do
         append_suppression_aggregates
-        batch = buffered_batch
-        return true if batch.empty?
+        append_pressure_aggregates
+        candidates = reserve_buffered_batch
+        return true if candidates.empty?
         return false if @transport.nil?
         return false if rate_limited?
+
+        # Replace consumed snapshot slots so dropped events do not remain owned
+        # by this batch while later callbacks run or transport waits.
+        prepared = candidates.map! do |event|
+          finalized = finalized_event_for(event)
+          if finalized.nil?
+            remove_buffered_events([event])
+            next
+          end
+          [event, finalized]
+        end.compact
+        return true if prepared.empty?
+
+        batch = prepared.map(&:first)
+        wire_events = prepared.map(&:last)
 
         result = Transport.coerce_result(
           @transport.call(
             project_token: config.project_token,
             service_name: service_name,
-            events: batch.map(&:dup)
+            events: wire_events.map(&:dup)
           )
         )
 
@@ -390,9 +462,43 @@ module DebugBundle
     rescue StandardError
       @consecutive_failures += 1
       false
+    ensure
+      release_buffered_batch
     end
+    private :flush_now
+
+    def finalized_event_for(event)
+      event_id = event['event_id']
+      cached, bypass = @buffer_mutex.synchronize do
+        [@finalized_events[event_id], @hook_bypass.include?(event_id)]
+      end
+      return cached if cached
+
+      finalized = bypass || !config.before_send ? event : apply_before_send(event)
+      return nil if finalized.nil?
+      return nil unless post_hook_event_allowed?(finalized)
+
+      cache_finalized_event(event, finalized)
+    end
+    private :finalized_event_for
+
+    def post_hook_event_allowed?(event)
+      case event['event_type']
+      when 'log_event'
+        return false if @capture_policy.capture_logs == 'off'
+
+        level_enabled?(normalize_level(event.dig('payload', 'level')))
+      when 'request_event'
+        payload = event['payload']
+        capture_request_event?(payload['response_status'].to_i, payload)
+      else
+        true
+      end
+    end
+    private :post_hook_event_allowed?
 
     def status
+      ensure_current_process!
       return :disconnected unless config.enabled?
       return :degraded unless config.configured?
       return @acknowledgement_state if @acknowledgement_state
@@ -402,7 +508,10 @@ module DebugBundle
       :healthy
     end
 
-    def buffered_event_count = @buffer_mutex.synchronize { @buffer.length }
+    def buffered_event_count
+      ensure_current_process!
+      @buffer_mutex.synchronize { @buffer.length }
+    end
 
     private
 
@@ -505,8 +614,8 @@ module DebugBundle
     def matching_immediate_client_error_path_rule?(status_code, request)
       return false unless (400..499).cover?(status_code)
 
-      path = normalize_request_path(request['path'] || request['url'])
-      method = request['method'].to_s.upcase
+      path = SafeInput.request_path(request['path'] || request['url'])
+      method = SafeInput.key(request['method'])&.upcase || ''
       Array(@capture_policy.immediate_client_error_path_rules).any? do |rule|
         next false unless rule.status_code == status_code
         next false if !rule.http_methods.empty? && !rule.http_methods.include?(method)
@@ -517,19 +626,6 @@ module DebugBundle
           path == rule.path_pattern
         end
       end
-    end
-
-    def normalize_request_path(value)
-      begin
-        uri = URI.parse(value.to_s)
-        return uri.path if uri.path && !uri.path.empty?
-      rescue URI::InvalidURIError
-        # Fall through to the lightweight path-only fallback.
-      end
-      fallback = value.to_s.split('?', 2).first.to_s.split('#', 2).first
-      return fallback if fallback.start_with?('/') && !fallback.empty?
-
-      '/'
     end
 
     def matching_probe_directives(label)
@@ -554,21 +650,16 @@ module DebugBundle
       return if candidate_directives.empty?
 
       candidate_directives.each do |directive|
-        event = apply_before_send(
-          base_event(
-            'probe_event',
-            {
-              'label' => label,
-              'data' => data,
-              'activation_id' => directive.id,
-              'probe_label_pattern' => directive.label_pattern
-            },
-            {}
-          )
-        )
         allowed = request_directives.include?(directive) ||
                   @capture_policy.capture_probe_events == 'standalone_when_activated'
-        enqueue_event(event) if event && allowed
+        next unless allowed
+
+        enqueue_event(base_event('probe_event', {
+                                   'label' => label,
+                                   'data' => data,
+                                   'activation_id' => directive.id,
+                                   'probe_label_pattern' => directive.label_pattern
+                                 }, {}))
       end
     end
 
@@ -583,7 +674,22 @@ module DebugBundle
 
     def local_environment? = LOCAL_ENVIRONMENTS.include?(environment_name.to_s)
 
-    def poll_remote_config_if_due!
+    def request_remote_config_poll_if_due
+      return unless @next_remote_config_poll_at && @next_remote_config_poll_at <= now
+
+      @config_worker&.wake
+    end
+
+    def refresh_remote_config_on_worker
+      if @initial_remote_config_pending
+        @initial_remote_config_pending = false
+        refresh_remote_config!
+      else
+        refresh_remote_config_if_due!
+      end
+    end
+
+    def refresh_remote_config_if_due!
       return unless @config_fetcher
       return unless @next_remote_config_poll_at && @next_remote_config_poll_at <= now
 
@@ -600,6 +706,12 @@ module DebugBundle
       @next_remote_config_poll_at = interval_seconds ? now + interval_seconds : nil
     end
 
+    def next_remote_config_wait_seconds
+      return nil unless @next_remote_config_poll_at
+
+      [@next_remote_config_poll_at - now, 0].max
+    end
+
     def capture_thread_exceptions
       return false if @thread_exception_registered
 
@@ -612,9 +724,13 @@ module DebugBundle
 
     def capture_thread_exception(error)
       capture_exception_internal(error, context: nil, handled: false, run_before_send: false)
-      flush
+      wake_sender
     rescue StandardError
       nil
+    end
+
+    def wake_sender
+      @delivery_worker&.wake
     end
 
     def now = @time_provider.call

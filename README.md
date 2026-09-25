@@ -4,7 +4,11 @@ Ruby SDK for DebugBundle.
 
 Use this gem to capture Ruby backend exceptions, request metadata, structured logs, runtime context, probe data, and browser relay traffic. It supports a singleton facade plus instance clients for Rack, Rails, Sidekiq, and explicit Ruby instrumentation.
 
-The source test matrix covers Ruby 3.1 through 4.0. Rails 7.x remains an installed-base lane; the current Rails 8.1 lane exercises the relay and Rack middleware on Ruby 4.0.
+The source test matrix covers Ruby 3.1 through 4.0. Rails 7.x remains an installed-base lane; the current Rails 8.1 lane exercises the relay and Rack middleware on Ruby 4.0. `make compat` runs the Rack, Rails, and Sidekiq Docker lanes, including Rails 8.1.
+
+Version 2.0 changes capture and hook timing. Existing installed 1.5.x applications continue to use their pinned gem until upgraded. Review [the migration guide](MIGRATION-2.0.md) before upgrading.
+
+`make sdk-safety-perf` runs a Docker-backed host-safety budget with 10,000 filtered INFO calls, 1,000 accepted ERROR calls with and without custom privacy fields, and 10,000 concurrent ERROR calls against a full queue while transport is held. CI and the release workflow run this gate before publication. These bounded synthetic checks supplement, but do not replace, installed runtime and workload qualification.
 
 ## Automatic capture and application filtering
 
@@ -40,7 +44,7 @@ DebugBundle.capture_message("worker started", level: :info)
 DebugBundle.flush
 ```
 
-`DebugBundle.init(...)` arms best-effort process exception capture automatically through `at_exit` and thread exception hooks.
+`DebugBundle.init(...)` arms best-effort process exception capture automatically through `at_exit` and thread exception hooks. These hooks wake the sender without waiting for delivery; shutdown exceptions can be lost if the process exits before the sender finishes. Automatic delivery runs on one background sender thread when the configured batch size or flush interval is reached. Remote configuration uses a separate bounded poller so a slow fetch cannot hold delivery. An explicit `flush` waits for the sender for at most five seconds and reports whether delivery completed. Call it during a controlled shutdown window when delivery is required. A forked child starts fresh workers on its first SDK use and drops inherited parent events, context, and probes while retaining the parent's capture restrictions until remote configuration refreshes.
 
 ## Framework Integrations
 
@@ -75,7 +79,7 @@ Capture-policy fields are server-owned and must not be supplied in local SDK con
 | `local_events_dir` | `.debugbundle/local/events` | Local event file destination. |
 | `spool_dir` | `.debugbundle/local/browser-relay-spool` | Relay durable spool destination. |
 | `redact_fields` | `[]` | Additional sensitive field names merged with built-in redaction defaults. Rails `filter_parameters` are added automatically. |
-| `batch_size` | `25` | Max events per flush batch. |
+| `batch_size` | `25` | Wake the background sender when this many events are buffered. |
 | `flush_interval` | `5` | Flush interval in seconds. |
 | `sample_rate` | `1.0` | Fraction of events kept before transport. |
 | `log_level` | `warning` | Minimum captured log severity. |
@@ -323,7 +327,7 @@ make smoke
 make smoke-published VERSION=1.5.0
 ```
 
-`make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields.
+`make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields. For version 2.0, it also forks the installed client and verifies exactly one child event without replaying the parent's buffered event.
 
 ## Examples
 
@@ -352,7 +356,7 @@ The repository ships a GitHub Actions release workflow at `.github/workflows/rel
 
 - Push a `v*` tag or run the workflow manually with a `version` input.
 - Configure the `RUBYGEMS_API_KEY` repository secret before enabling publish.
-- The workflow runs lint, tests, gem build, `make smoke`, RubyGems publish, and `make smoke-published VERSION=<tag>` before creating the GitHub release.
+- The workflow runs lint, tests, the full `make compat` framework/runtime matrix, gem build, `make smoke`, RubyGems publish, and `make smoke-published VERSION=<tag>` before creating the GitHub release.
 
 ## Documentation
 

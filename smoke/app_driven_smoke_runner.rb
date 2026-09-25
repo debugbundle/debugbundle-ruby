@@ -5,6 +5,7 @@ require 'json_schemer'
 require 'rack'
 require 'rack/mock_request'
 require 'socket'
+require 'timeout'
 require 'debugbundle'
 
 PROJECT_TOKEN = 'dbundle_proj_smoke'
@@ -240,8 +241,27 @@ begin
   )
   assert!(relay_response.status == 202, "unexpected_relay_status: #{relay_response.status}")
 
+  if Gem::Version.new(expected_version) >= Gem::Version.new('2.0.0.pre.0')
+    reader, writer = IO.pipe
+    fork_pid = Process.fork do
+      reader.close
+      DebugBundle.capture_log('ruby fork child smoke', level: :error)
+      writer.write(DebugBundle.flush ? 'delivered' : 'not_delivered')
+      writer.close
+      exit! 0
+    end
+    writer.close
+    Timeout.timeout(5) { Process.wait(fork_pid) }
+    fork_pid = nil
+    assert!(reader.read == 'delivered', 'forked_child_delivery_failed')
+    reader.close
+  end
+
   DebugBundle.flush
 ensure
+  Process.kill('KILL', fork_pid) if defined?(fork_pid) && fork_pid
+  reader&.close if defined?(reader)
+  writer&.close if defined?(writer)
   server.close
 end
 
@@ -264,6 +284,13 @@ assert!(ingestion_requests.none? { |request| JSON.generate(request.body).include
 
 backend_request, log_event = find_event(ingestion_requests) do |event|
   event['event_type'] == 'log_event' && event.dig('payload', 'message') == 'ruby app-driven smoke message'
+end
+if Gem::Version.new(expected_version) >= Gem::Version.new('2.0.0.pre.0')
+  delivered_messages = ingestion_requests.flat_map { |entry| Array(entry.body['events']) }.filter_map do |event|
+    event.dig('payload', 'message') if event['event_type'] == 'log_event'
+  end
+  assert!(delivered_messages.count('ruby fork child smoke') == 1, 'forked_child_event_missing_or_replayed')
+  assert!(delivered_messages.count('ruby app-driven smoke message') == 1, 'parent_event_replayed_by_child')
 end
 
 [log_event].each do |event|

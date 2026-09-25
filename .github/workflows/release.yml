@@ -98,6 +98,12 @@ jobs:
           bundle exec rubocop
           bundle exec rspec
 
+      - name: Enforce host-safety performance budget
+        run: make sdk-safety-perf
+
+      - name: Run supported framework compatibility matrix
+        run: make compat
+
       - name: Build gem artifact
         run: gem build debugbundle.gemspec
 

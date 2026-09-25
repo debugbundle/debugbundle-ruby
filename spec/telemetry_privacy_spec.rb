@@ -26,4 +26,20 @@ RSpec.describe DebugBundle::TelemetryPrivacy do
     expect(described_class.protect(safe, additional_fields: ['tenant_pin_code'])).to eq(safe)
     expect(input.fetch('password')).to eq('SYNTHETIC_SECRET')
   end
+
+  it 'redacts multiple assignment names in one text while retaining ordinary words' do
+    text = 'password=alpha token=beta tenant_pin_code=gamma status=ok'
+
+    expect(described_class.protect(text, additional_fields: ['tenant_pin_code'])).to eq(
+      'password=[REDACTED] token=[REDACTED] tenant_pin_code=[REDACTED] status=ok'
+    )
+  end
+
+  it 'redacts every mandatory assignment label without consuming adjacent text' do
+    DebugBundle::TelemetryPrivacy::FIELDS.each do |field|
+      expect(described_class.protect("before #{field}=synthetic after")).to eq(
+        "before #{field}=[REDACTED] after"
+      ), field
+    end
+  end
 end

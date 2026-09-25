@@ -36,6 +36,8 @@ RSpec.describe 'repository metadata' do
     expect(ci_workflow).to include('make smoke')
     expect(release_workflow).to include('make smoke')
     expect(release_workflow).to include('make smoke-published VERSION=${RELEASE_VERSION}')
+    expect(makefile).to include('compat: compat-rack compat-rails compat-rails-8 compat-sidekiq')
+    expect(release_workflow.index('run: make compat')).to be < release_workflow.index('Publish to RubyGems')
   end
 
   it 'documents the Ruby release documentation gates in the README' do

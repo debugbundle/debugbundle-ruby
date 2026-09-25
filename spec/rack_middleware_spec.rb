@@ -36,12 +36,14 @@ RSpec.describe DebugBundle::Rack::Middleware do
       }
     end
 
-    DebugBundle::Client.new(
+    sdk = DebugBundle::Client.new(
       project_token: 'dbundle_proj_test',
       service: 'checkout-api',
       transport: transport,
       config_fetcher: config_fetcher
     )
+    sdk.refresh_remote_config!
+    sdk
   end
 
   it 'captures request metadata and preserves the response' do
@@ -159,6 +161,7 @@ RSpec.describe DebugBundle::Rack::Middleware do
       transport: transport,
       config_fetcher: config_fetcher
     )
+    trigger_client.refresh_remote_config!
 
     app = lambda do |_env|
       trigger_client.probe('checkout.tax', { region: 'us-east-1' })

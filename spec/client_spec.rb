@@ -83,7 +83,7 @@ RSpec.describe DebugBundle::Client do
     expect(event.fetch('correlation')).to include('request_id' => 'req-1')
   end
 
-  it 'registers at-exit capture once and flushes shutdown exceptions' do
+  it 'registers at-exit capture once and queues shutdown exceptions' do
     client = described_class.new(project_token: 'dbundle_proj_test', transport: transport)
     registered_callback = nil
 
@@ -101,6 +101,7 @@ RSpec.describe DebugBundle::Client do
       registered_callback.call
     end
 
+    expect(client.flush).to be(true)
     event = transport_events.fetch(0).fetch(:events).fetch(0)
     expect(event.fetch('event_type')).to eq('backend_exception')
     expect(event.fetch('payload')).to include('handled' => false, 'message' => 'shutdown boom')
@@ -119,6 +120,7 @@ RSpec.describe DebugBundle::Client do
 
     expect { thread.value }.to raise_error(RuntimeError, 'thread boom')
 
+    expect(client.flush).to be(true)
     event = transport_events.fetch(0).fetch(:events).fetch(0)
     expect(event.fetch('event_type')).to eq('backend_exception')
     expect(event.fetch('payload')).to include('handled' => false, 'message' => 'thread boom')
@@ -233,7 +235,7 @@ RSpec.describe DebugBundle::Client do
     )
     sampled_client.capture_message('sampled out', level: :error)
     sampled_client.flush
-    expect(sampled_calls).to eq(1)
+    expect(sampled_calls).to eq(0)
     expect(transport_events.length).to eq(2)
   end
 

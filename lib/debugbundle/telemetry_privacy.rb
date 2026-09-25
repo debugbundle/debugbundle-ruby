@@ -14,6 +14,11 @@ module DebugBundle
       verification_code authorization cookie ssn client_secret x_api_key set_cookie
       proxy_authorization accessToken refreshToken privateKey clientSecret
     ].freeze
+    ASSIGNMENT_VALUE_PATTERN = '(?:"[^"]*"|\'[^\']*\'|[^\s&,;]+)'
+    DEFAULT_ASSIGNMENT_PATTERN = Regexp.new(
+      "\\b(#{FIELDS.map { |field| Regexp.escape(field) }.join('|')})\\b([\"']?\\s*[:=]\\s*)#{ASSIGNMENT_VALUE_PATTERN}",
+      Regexp::IGNORECASE
+    )
 
     module_function
 
@@ -25,7 +30,8 @@ module DebugBundle
 
       work = { nodes: 0, bytes: 0, seen: {}.compare_by_identity,
                fields: (FIELDS + additional_fields).map { |field| canonical(field) },
-               extra: additional_fields }
+               extra: additional_fields,
+               assignment_pattern: assignment_pattern(additional_fields) }
       result = visit(value, work, 0, true)
       raise ArgumentError, 'budget_exceeded' if JSON.generate(result).bytesize > MAX_BYTES
 
@@ -46,6 +52,13 @@ module DebugBundle
 
     def canonical(value)
       value.downcase.gsub(/[^a-z0-9]/, '')
+    end
+
+    def assignment_pattern(additional_fields)
+      return DEFAULT_ASSIGNMENT_PATTERN if additional_fields.empty?
+
+      terms = (FIELDS + additional_fields).map { |field| Regexp.escape(field) }.join('|')
+      Regexp.new("\\b(#{terms})\\b([\"']?\\s*[:=]\\s*)#{ASSIGNMENT_VALUE_PATTERN}", Regexp::IGNORECASE)
     end
 
     def sensitive_key?(key, fields)
@@ -151,10 +164,7 @@ module DebugBundle
       result = result.gsub(/\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/i, '\\1: [REDACTED]')
       result = result.gsub(%r{\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{6,}}i, '\\1 [REDACTED]')
       result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent)_[A-Za-z0-9_-]+\b/, REDACTED)
-      (FIELDS + work[:extra]).each do |field|
-        pattern = /\b(#{Regexp.escape(field)})\b(["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s&,;]+)/i
-        result = result.gsub(pattern, '\\1\\2[REDACTED]')
-      end
+      result = result.gsub(work[:assignment_pattern], '\\1\\2[REDACTED]')
       result = result.gsub(/(?<![A-Za-z0-9_-])(?:[0-9][ -]?){12,18}[0-9](?![A-Za-z0-9_-])/) do |candidate|
         valid_card?(candidate) ? REDACTED : candidate
       end
