@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-26
+
+### Fixed
+
+- Honor bounded retry hints after partial/malformed acknowledgements and service failures; accept HTTP-date hints. Preserve no-hint service-failure timing.
+- Treat nonfinite HTTP and custom retry hints as missing, preserving finite backoff and recovery; clamp numeric headers before integer conversion.
+
+- Require a valid canonical acknowledgement from built-in HTTP delivery; retain the full batch and back off for missing or malformed responses. Preserve bodyless file and explicit custom transport compatibility.
+
 ## [2.0.0] - 2026-09-25
 
 ### Changed

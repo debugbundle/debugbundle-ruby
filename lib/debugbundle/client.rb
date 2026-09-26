@@ -443,10 +443,10 @@ module DebugBundle
         case result.status_code
         when 200..299
           handle_successful_result(result, batch)
-        when 429
+        when 429, 500..599
           @consecutive_failures += 1
-          retry_after_seconds = (result.retry_after_seconds || 1).clamp(1, RETRY_AFTER_CAP_SECONDS)
-          @retry_at = now + retry_after_seconds
+          retry_after_seconds = bounded_retry_hint(result.retry_after_seconds)
+          @retry_at = now + retry_after_seconds if result.status_code == 429 || !result.retry_after_seconds.nil?
           false
         when 400..499
           remove_buffered_events(batch)
@@ -515,9 +515,15 @@ module DebugBundle
 
     private
 
+    def bounded_retry_hint(value)
+      return 1 unless value.is_a?(Numeric) && value.real? && value.finite?
+
+      value.clamp(1, RETRY_AFTER_CAP_SECONDS)
+    end
+
     def handle_successful_result(result, batch)
-      decision = Acknowledgement.decide(result.body, batch.length)
-      return handle_protocol_failure if decision[:kind] == :protocol_failure
+      decision = Acknowledgement.decide(result.body, batch.length, required: @transport.is_a?(Transport::HttpTransport))
+      return handle_protocol_failure(result.retry_after_seconds) if decision[:kind] == :protocol_failure
 
       if decision[:kind] == :legacy
         remove_buffered_events(batch)
@@ -532,7 +538,7 @@ module DebugBundle
 
       if retryable_events.any?
         @consecutive_failures += 1
-        @retry_at = now + 1
+        @retry_at = now + bounded_retry_hint(result.retry_after_seconds)
         @acknowledgement_state = :degraded
         false
       else
@@ -543,9 +549,9 @@ module DebugBundle
       end
     end
 
-    def handle_protocol_failure
+    def handle_protocol_failure(retry_hint)
       @consecutive_failures += 1
-      @retry_at = now + 1
+      @retry_at = now + bounded_retry_hint(retry_hint)
       @acknowledgement_state = :degraded
       false
     end

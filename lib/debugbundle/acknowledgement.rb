@@ -11,8 +11,8 @@ module DebugBundle
 
     module_function
 
-    def decide(body, batch_length)
-      return { kind: :legacy } unless body.is_a?(Hash) && FIELDS.any? { |field| body.key?(field) }
+    def decide(body, batch_length, required: false)
+      return missing_acknowledgement(required) unless body.is_a?(Hash) && FIELDS.any? { |field| body.key?(field) }
       return protocol_failure unless FIELDS.all? { |field| body.key?(field) }
 
       accepted = body['accepted']
@@ -54,6 +54,10 @@ module DebugBundle
 
     def protocol_failure
       { kind: :protocol_failure }
+    end
+
+    def missing_acknowledgement(required)
+      required ? protocol_failure : { kind: :legacy }
     end
   end
 end

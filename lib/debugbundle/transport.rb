@@ -4,6 +4,7 @@ require 'json'
 require 'net/http'
 require 'securerandom'
 require 'uri'
+require 'time'
 require 'fileutils'
 
 module DebugBundle
@@ -83,8 +84,11 @@ module DebugBundle
       def parse_retry_after(value)
         return nil if value.nil? || value.strip.empty?
 
-        seconds = Integer(Float(value))
-        seconds.clamp(0, RETRY_AFTER_CAP_SECONDS)
+        seconds = Float(value, exception: false)
+        seconds = Time.httpdate(value) - Time.now if seconds.nil?
+        return nil unless seconds.finite?
+
+        seconds.clamp(0, RETRY_AFTER_CAP_SECONDS).to_i
       rescue ArgumentError, TypeError
         nil
       end

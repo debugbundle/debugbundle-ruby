@@ -26,6 +26,10 @@ check-docker:
 test-focused:
 	docker run --rm -v "$(CURDIR):$(WORKDIR)" -w "$(WORKDIR)" $(RUBY_IMAGE) sh -lc 'BUNDLE_PATH=vendor/bundle SIMPLECOV_MINIMUM_COVERAGE=0 bundle exec rspec $(TEST_FILES)'
 
+.PHONY: format-transport-tests
+format-transport-tests:
+	docker run --rm -v "$(CURDIR):$(WORKDIR)" -w "$(WORKDIR)" $(RUBY_IMAGE) sh -lc 'BUNDLE_PATH=vendor/bundle bundle exec rubocop -a spec/http_acknowledgement_spec.rb'
+
 bundle-install:
 	$(DOCKER_RUN) sh -lc "$(BUNDLE_ENV) bundle config set path vendor/bundle && $(BUNDLE_ENV) bundle install"
 
