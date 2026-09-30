@@ -163,7 +163,7 @@ module DebugBundle
       result = result.gsub(pem, REDACTED)
       result = result.gsub(/\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/i, '\\1: [REDACTED]')
       result = result.gsub(%r{\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{6,}}i, '\\1 [REDACTED]')
-      result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent)_[A-Za-z0-9_-]+\b/, REDACTED)
+      result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent|anl|anr|ah)_[A-Za-z0-9_-]+\b/, REDACTED)
       result = result.gsub(work[:assignment_pattern], '\\1\\2[REDACTED]')
       result = result.gsub(/(?<![A-Za-z0-9_-])(?:[0-9][ -]?){12,18}[0-9](?![A-Za-z0-9_-])/) do |candidate|
         valid_card?(candidate) ? REDACTED : candidate
@@ -179,7 +179,9 @@ module DebugBundle
     end
 
     def scrub_url(raw, work)
-      uri = URI.parse(raw)
+      # Fragments are never retained. Remove them before parsing because a
+      # credential replacement contains brackets that Ruby rejects in a URI.
+      uri = URI.parse(raw.split('#', 2).first)
       return REDACTED unless uri.host
 
       if uri.userinfo
