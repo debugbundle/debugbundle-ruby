@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-01
+
 ### Added
 
 - Proof-gated, bounded exception cause/frame evidence derived from retained scalar snapshots; smaller fatal-hook limits preserve existing error text and grouping.

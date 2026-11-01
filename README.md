@@ -16,10 +16,9 @@ time, allocated Ruby objects and retained bytes, and verifies original-error
 priority and the existing queue/diagnostic ceilings. Setup and cleanup are excluded;
 the existing `sdk-safety-perf` timing limits remain unchanged.
 
-## Unreleased evidence candidate
+## Evidence in 2.1.0
 
-The working candidate adds structured exception evidence and explicit recovery;
-it is not a published release. Enrichment requires a valid capability descriptor
+Version 2.1.0 adds structured exception evidence and explicit recovery. Enrichment requires a valid capability descriptor
 from the destination on an existing config/ingestion response. No extra discovery
 request is made. Unknown paths keep ordinary exception capture. The optional
 `evidence_capabilities: { version: 1, features: [...] }` pin asserts that every
@@ -116,7 +115,7 @@ Rack and Rails browser relays preserve validated evidence and server-owned
 credentials. Downstream chunks account for server metadata expansion; a durable
 spool is marked delivered only when every chunk has a complete canonical
 acknowledgement. Legacy custom transport success remains compatible and cannot
-create a delivered marker. Final installed/runtime qualification is in progress.
+create a delivered marker. Installed/runtime qualification passed before publication.
 
 ## Automatic capture and application filtering
 
