@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Reuse repeated protected frame text within one bounded evidence projection while preserving independent mutable frame values and avoiding cross-client caches.
 - Preserve engine metadata under the existing canonical `runtime.framework_extras` block and supply an honest header when an exception has no native stack.
 - Validate fresh references, graph structure, placement, Unicode/number byte limits, CSP timestamps and canonical hook identity/type replacements against a shared conformance corpus.
 - Validate complete canonical hook envelopes before and after privacy, including conditional frontend identity, without restricting schema-allowed identity/type changes.

@@ -33,6 +33,21 @@ RSpec.describe DebugBundle::ExceptionEvidence do
     expect(calls).to eq([])
   end
 
+  it 'keeps repeated protected frame text independently owned within and across graphs' do
+    trace = (1..3).map { |line| "https://user:password@cdn.example/app.rb?token=secret:#{line}:in 'run'" }.join("\n")
+    input = root.merge('stack' => trace)
+    first = described_class.from_retained(root: input, causes: [])
+    frames = first['nodes'][0]['frames']
+    expect(frames.map { |frame| frame['line'] }).to eq([1, 2, 3])
+    expect(frames.map { |frame| frame['file'] }).to eq(Array.new(3, 'https://cdn.example/app.rb'))
+    frames[0]['file'].replace('/hook-owned.rb')
+    frames[0]['function'].replace('hook_owned')
+    expect(frames[1]).to include('file' => 'https://cdn.example/app.rb', 'function' => 'run')
+    again = described_class.from_retained(root: input, causes: [])
+    expect(again['nodes'][0]['frames'][0]).to include('file' => 'https://cdn.example/app.rb', 'function' => 'run')
+    expect(JSON.generate(again)).not_to include('password', 'secret', 'hook_owned')
+  end
+
   it 'does not dispatch equality through a foreign class while checking retained snapshots' do
     calls = []
     type = Class.new

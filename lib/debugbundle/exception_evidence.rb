@@ -107,10 +107,14 @@ module DebugBundle
       # Charge exact JSON fragments incrementally. Re-encoding the whole graph
       # for every rejected frame would amplify work on adversarial long stacks.
       used = JSON.generate(graph).bytesize + 32
+      # A bounded graph often repeats one file/function across many frames.
+      # Reuse protected text only within this projection; returned strings remain
+      # independently owned so a hook cannot mutate another frame through aliases.
+      text_cache = {}
       graph['nodes'].each_with_index do |node, index|
         stack = snapshots[index]['stack']
         stack.each_line do |line|
-          frame = parse_frame(line)
+          frame = parse_frame(line, text_cache)
           next unless frame
 
           cost = JSON.generate(frame).bytesize + (node['frames'].empty? ? 0 : 1)
@@ -136,12 +140,21 @@ module DebugBundle
       end
     end
 
-    def parse_frame(line)
+    def parse_frame(line, text_cache = nil)
       match = /\A(.+):([1-9]\d*)(?::in [`']([^`'\r\n]*)[`'])?\z/.match(line.strip)
       return nil unless match
 
-      { 'function' => match[3] && owned_text(match[3], 256), 'file' => frame_file(match[1]),
+      { 'function' => match[3] && frame_text(match[3], 256, text_cache),
+        'file' => frame_text(match[1], 2048, text_cache),
         'line' => match[2].to_i, 'column' => nil, 'classification' => 'unknown' }
+    end
+
+    def frame_text(value, limit, cache)
+      return limit == 2048 ? frame_file(value) : owned_text(value, limit) unless cache
+
+      key = [limit, value]
+      cache[key] ||= (limit == 2048 ? frame_file(value) : owned_text(value, limit)).freeze
+      cache[key].dup
     end
 
     def frame_file(value)
