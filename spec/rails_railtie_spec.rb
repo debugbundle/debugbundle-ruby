@@ -20,7 +20,7 @@ RSpec.describe 'Rails Railtie integration' do
     Rails.instance_variable_set(:@application, nil)
   end
 
-  it 'mounts the configured relay route and forwards browser events' do
+  it 'configures evidence capture and mounts the configured browser relay' do
     post '/relay/browser',
          JSON.generate('batch' => [browser_event]),
          {
@@ -46,6 +46,11 @@ RSpec.describe 'Rails Railtie integration' do
          }
 
     expect(last_response.status).to eq(404)
+    expect(DebugBundle.client.config.capture_recovery_observations).to be(true)
+    expect(DebugBundle.client.config.capture_exception_evidence).to be(false)
+    expect(DebugBundle.client.config.evidence_capabilities['features']).to eq(['recovery_v1'])
+    handler = DebugBundle::Rails.build_relay_handler(app)
+    expect(handler.instance_variable_get(:@evidence).features).to eq(['recovery_v1'])
   end
 
   def build_rails_app
@@ -69,13 +74,19 @@ RSpec.describe 'Rails Railtie integration' do
     end
 
     app_class.config.hosts << 'app.example.com' if app_class.config.respond_to?(:hosts)
-    app_class.config.debugbundle.project_token = 'dbundle_proj_test'
-    app_class.config.debugbundle.service = 'rails-checkout'
-    app_class.config.debugbundle.environment = 'production'
-    app_class.config.debugbundle.relay_durable_write = false
-    app_class.config.debugbundle.relay_allowed_origins = ['https://app.example.com']
-    app_class.config.debugbundle.relay_forward_transport = forward_transport
-    app_class.config.debugbundle.relay_path = '/relay/browser'
+    debug_options = app_class.config.debugbundle
+    debug_options.project_token = 'dbundle_proj_test'
+    debug_options.service = 'rails-checkout'
+    debug_options.environment = 'production'
+    debug_options.endpoint = 'http://127.0.0.1:1/v1/events'
+    debug_options.capture_exception_evidence = false
+    debug_options.capture_recovery_observations = true
+    debug_options.evidence_capabilities = { 'version' => 1, 'features' => ['recovery_v1'] }
+    debug_options.relay_evidence_capabilities = { 'version' => 1, 'features' => ['recovery_v1'] }
+    debug_options.relay_durable_write = false
+    debug_options.relay_allowed_origins = ['https://app.example.com']
+    debug_options.relay_forward_transport = forward_transport
+    debug_options.relay_path = '/relay/browser'
     app_class.initialize!
     app_class
   end

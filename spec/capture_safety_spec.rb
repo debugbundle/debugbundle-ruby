@@ -14,13 +14,15 @@ RSpec.describe DebugBundle::Client do
                                    DebugBundle::Transport::Result.new(status_code: 500)
                                  })
     1000.times { |index| client.capture_log("ordinary #{index}", level: :warning) }
+    reserved_ids = client.__send__(:buffered_batch).map { |event| event['event_id'] }
     flusher = Thread.new { client.flush }
     inflight = Timeout.timeout(5) { entered.pop }
     1000.times { |index| client.capture_exception(RuntimeError.new("failure #{index}")) }
     pending = client.__send__(:buffered_batch)
 
     expect((inflight + pending).map { |event| event['event_id'] }.uniq.length).to be <= 1000
-    expect(pending.map { |event| event['event_id'] }).to eq(inflight.map { |event| event['event_id'] })
+    expect(pending.map { |event| event['event_id'] }).to eq(reserved_ids)
+    expect(inflight.all? { |event| reserved_ids.include?(event['event_id']) }).to be(true)
     release << true
     flusher.join
     client.capture_exception(RuntimeError.new('after sender release'))
@@ -526,6 +528,18 @@ RSpec.describe DebugBundle::Client do
 
     expect(client.buffered_event_count).to eq(0)
     expect(client.instance_variable_get(:@remote_config).probes_enabled).to be(false)
+  ensure
+    client&.close
+  end
+
+  it 'keeps permanent disposal inactive after a process generation change' do
+    client = described_class.new(project_token: 'dbundle_proj_test',
+                                 transport: ->(_request) { DebugBundle::Transport::Result.new(status_code: 202) })
+    client.dispose
+    client.instance_variable_set(:@owner_pid, Process.pid - 1)
+    client.capture_log('retired project', level: :error)
+    expect(client.buffered_event_count).to eq(0)
+    expect(client.instance_variable_get(:@delivery_worker)).to be_nil
   ensure
     client&.close
   end

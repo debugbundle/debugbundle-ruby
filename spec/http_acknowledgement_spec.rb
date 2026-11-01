@@ -49,7 +49,10 @@ RSpec.describe 'HTTP acknowledgement reliability' do
     allow(http).to receive(:use_ssl=)
     allow(http).to receive(:open_timeout=)
     allow(http).to receive(:read_timeout=)
-    allow(http).to receive(:post).and_return(response)
+    allow(http).to receive(:post) do |_path, _body, _headers, &consume|
+      consume.call(response.body)
+      response
+    end
     transport = DebugBundle::Transport::HttpTransport.new('https://example.invalid/events')
     { '1e300' => 300, 'NaN' => nil, 'Infinity' => nil, '-Infinity' => nil, '-1' => 0,
       '0.25' => 0, (Time.now.utc + 86_400).httpdate => 300,
@@ -106,7 +109,10 @@ RSpec.describe 'HTTP acknowledgement reliability' do
       allow(http).to receive(:use_ssl=)
       allow(http).to receive(:open_timeout=)
       allow(http).to receive(:read_timeout=)
-      allow(http).to receive(:post).and_return(response)
+      allow(http).to receive(:post) do |_path, _body, _headers, &consume|
+        consume.call(response.body)
+        response
+      end
       transport = DebugBundle::Transport::HttpTransport.new('https://example.invalid/events')
       client = DebugBundle::Client.new(project_token: 'dbundle_proj_test', transport: transport,
                                        flush_interval: 3600, time_provider: -> { now })

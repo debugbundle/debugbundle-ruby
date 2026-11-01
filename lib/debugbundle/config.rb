@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'debugbundle/evidence_wire'
+
 module DebugBundle
   class Config
     DEFAULT_ENDPOINT = 'https://api.debugbundle.com/v1/events'
@@ -40,7 +42,10 @@ module DebugBundle
                 :max_probe_entries_per_label,
                 :probe_flush_on_error,
                 :probes_poll_interval,
-                :before_send
+                :before_send,
+                :capture_exception_evidence,
+                :capture_recovery_observations,
+                :evidence_capabilities
 
     def initialize(
       project_token: nil,
@@ -63,7 +68,10 @@ module DebugBundle
       max_probe_entries_per_label: DEFAULT_MAX_PROBE_ENTRIES_PER_LABEL,
       probe_flush_on_error: DEFAULT_PROBE_FLUSH_ON_ERROR,
       probes_poll_interval: DEFAULT_PROBES_POLL_INTERVAL,
-      before_send: nil
+      before_send: nil,
+      capture_exception_evidence: true,
+      capture_recovery_observations: false,
+      evidence_capabilities: nil
     )
       @project_token = project_token
       @enabled = enabled
@@ -92,6 +100,11 @@ module DebugBundle
       @probe_flush_on_error = probe_flush_on_error
       @probes_poll_interval = normalize_positive_number(probes_poll_interval, DEFAULT_PROBES_POLL_INTERVAL)
       @before_send = before_send.respond_to?(:call) ? before_send : nil
+      @capture_exception_evidence = !false.equal?(capture_exception_evidence)
+      @capture_recovery_observations = true.equal?(capture_recovery_observations)
+      @evidence_capabilities = EvidenceWire.descriptor(EvidenceValue.options(evidence_capabilities))
+      @evidence_capabilities['features'].freeze
+      @evidence_capabilities.freeze
       freeze
     end
 

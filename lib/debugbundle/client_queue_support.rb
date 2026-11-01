@@ -5,6 +5,20 @@ module DebugBundle
     module QueueSupport
       private
 
+      def initialize_buffer_ownership
+        @buffer = []
+        @buffer_bytes = 0
+        @buffer_priority_counts = [0, 0, 0, 0]
+        @inflight_event_ids = Set.new
+        @inflight_priority_counts = [0, 0, 0, 0]
+        @event_sizes = {}
+        @pressure_drops = {}
+        @hook_bypass = Set.new
+        @finalized_events = {}
+        @buffer_mutex = Mutex.new
+        @flush_mutex = Mutex.new
+      end
+
       def preflight_capacity?(priority, kind)
         @buffer_mutex.synchronize do
           full = @buffer.length >= MAX_BUFFER_SIZE || @buffer_bytes >= MAX_BUFFER_BYTES
@@ -23,7 +37,10 @@ module DebugBundle
 
         event_size = JSON.generate(event).bytesize
         admitted, buffered = @buffer_mutex.synchronize do
+          next [false, @buffer.length] unless reserve_diagnostic_locked(event, event_size)
+
           unless admit_event_locked?(event, event_size)
+            release_diagnostics_locked(event)
             record_pressure_drop_locked(event) if record_pressure
             next [false, @buffer.length]
           end
@@ -118,7 +135,8 @@ module DebugBundle
         @buffer_priority_counts[event_priority(event)] -= 1
         @inflight_priority_counts[event_priority(event)] -= 1 if @inflight_event_ids.delete?(event_id)
         @hook_bypass.delete(event_id)
-        @finalized_events.delete(event_id)
+        finalized = @finalized_events.delete(event_id)
+        release_diagnostics_locked(event, finalized)
       end
 
       def evictable_event_index(priority)
@@ -130,9 +148,13 @@ module DebugBundle
       def cache_finalized_event(event, finalized)
         # The original stays available for acknowledgement identity and retries, so
         # a distinct hook replacement owns additional bytes until removal.
+        finalized = event if finalized == event
         extra_bytes = finalized.equal?(event) ? 0 : JSON.generate(finalized).bytesize
         @buffer_mutex.synchronize do
-          while @buffer_bytes + extra_bytes > MAX_BUFFER_BYTES
+          previous = @finalized_events[event['event_id']]
+          old_extra = previous && !previous.equal?(event) ? JSON.generate(previous).bytesize : 0
+          delta = extra_bytes - old_extra
+          while @buffer_bytes + delta > MAX_BUFFER_BYTES
             index = evictable_event_index(event_priority(event))
             unless index
               record_pressure_drop_locked(event)
@@ -142,8 +164,8 @@ module DebugBundle
             remove_event_ownership_locked(removed)
             record_pressure_drop_locked(removed)
           end
-          @buffer_bytes += extra_bytes
-          @event_sizes[event['event_id']] += extra_bytes
+          @buffer_bytes += delta
+          @event_sizes[event['event_id']] += delta
           @finalized_events[event['event_id']] = finalized
         end
       end
@@ -156,11 +178,44 @@ module DebugBundle
         end
       end
 
+      def prepare_wire_batch(candidates)
+        prepared = []
+        size = EventBatch::WRAPPER_BYTES
+        limit = @transport.is_a?(Transport::FileTransport) ? nil : EventBatch::MAX_BODY_BYTES
+        candidates.each do |event|
+          finalized = finalized_event_for(event)
+          unless finalized
+            remove_buffered_events([event])
+            next
+          end
+
+          cost = EventBatch.bytes(finalized) + (prepared.empty? ? 0 : 1)
+          break if limit && size + cost > limit
+
+          prepared << [event, finalized]
+          size += cost
+        end
+        prepared
+      end
+
       def release_buffered_batch
         @buffer_mutex.synchronize do
           @inflight_event_ids.clear
           @inflight_priority_counts = [0, 0, 0, 0]
+          discard_closed_buffer_locked if @closed
         end
+      end
+
+      def discard_closed_buffer_locked
+        # A stopped sender discards queued work. An active send keeps ownership
+        # charged until its ensure block releases the last snapshot.
+        @buffer.reject! do |event|
+          next false if @inflight_event_ids.include?(event['event_id'])
+
+          remove_event_ownership_locked(event)
+          true
+        end
+        @diagnostics = DiagnosticBudget.new if @buffer.empty?
       end
 
       def buffered_batch

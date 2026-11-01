@@ -13,19 +13,11 @@ module DebugBundle
         inherited_probes_enabled = @remote_config.probes_enabled
         # A fork inherits buffers, locks, and an unusable sender thread. Reset them
         # before touching any inherited synchronization object or captured event.
-        @buffer = []
-        @buffer_bytes = 0
-        @buffer_priority_counts = [0, 0, 0, 0]
-        @inflight_event_ids = Set.new
-        @inflight_priority_counts = [0, 0, 0, 0]
-        @event_sizes = {}
-        @pressure_drops = {}
-        @hook_bypass = Set.new
-        @finalized_events = {}
-        @buffer_mutex = Mutex.new
-        @flush_mutex = Mutex.new
+        initialize_buffer_ownership
         @probe_buffers = {}
         @context = {}
+        @operations&.clear
+        initialize_evidence
         @suppression = Suppression::Tracker.new
         @last_event_at = nil
         @retry_at = nil
@@ -41,7 +33,8 @@ module DebugBundle
         @delivery_worker = nil
         @config_worker = nil
         @owner_pid = current_pid
-        return unless config.enabled? && config.configured?
+        @closed = @retired
+        return unless !@closed && config.enabled? && config.configured?
 
         @delivery_worker = DeliveryWorker.new(
           interval: config.flush_interval,

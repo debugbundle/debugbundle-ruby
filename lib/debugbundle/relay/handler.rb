@@ -2,6 +2,7 @@
 
 require 'json'
 require 'uri'
+require 'debugbundle/relay/forwarder'
 
 module DebugBundle
   module Relay
@@ -12,6 +13,7 @@ module DebugBundle
       request_event
       probe_event
       analytics_event
+      diagnostic_context
     ].freeze
     BROWSER_SDK_NAME = '@debugbundle/sdk-browser'
     DEFAULT_MAX_BODY_BYTES = 262_144
@@ -20,6 +22,8 @@ module DebugBundle
     Response = Struct.new(:status, :body, :headers, keyword_init: true)
 
     class Handler
+      attr_reader :max_body_bytes
+
       def initialize(
         project_mode: :connected,
         project_token: nil,
@@ -33,7 +37,8 @@ module DebugBundle
         max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         rate_limit_per_minute: DEFAULT_RATE_LIMIT_PER_MINUTE,
         rate_limit_store: nil,
-        forward_transport: nil
+        forward_transport: nil,
+        evidence_capabilities: nil
       )
         @project_mode = project_mode.to_sym
         @project_token = project_token
@@ -48,16 +53,24 @@ module DebugBundle
         @rate_limit_per_minute = rate_limit_per_minute
         @rate_limit_store = rate_limit_store
         @forward_transport = forward_transport || Transport::HttpTransport.new(@endpoint)
+        @evidence = EvidenceDelivery.new(evidence_capabilities)
+        @forwarder = Forwarder.new(@forward_transport, @project_token, @evidence)
         @rate_limit_state = Hash.new { |hash, key| hash[key] = [] }
       end
 
       def handle(request)
         method = request.fetch(:method, 'POST').to_s.upcase
         headers = normalize_headers(request[:headers] || {})
+        discover = requests_evidence?(request, headers)
         raw_body = request[:body].to_s
         return Response.new(status: 403, body: nil, headers: {}) unless origin_allowed?(headers)
 
-        response_headers = source_origin(headers) ? cors_headers(source_origin(headers)) : {}
+        response_headers = if source_origin(headers)
+                             cors_headers(source_origin(headers),
+                                          headers['access-control-request-headers'])
+                           else
+                             {}
+                           end
         early_response = request_validation_response(
           method: method,
           headers: headers,
@@ -66,11 +79,17 @@ module DebugBundle
         )
         return with_headers(early_response, response_headers) if early_response
 
-        accepted, errors = sanitize_batch(raw_body)
+        accepted, errors, indexed = sanitize_batch(raw_body)
 
-        deliver(accepted) unless accepted.empty?
+        deliver(accepted, discover: discover) unless accepted.empty?
 
-        with_headers(batch_response(accepted, errors), response_headers)
+        response = batch_response(accepted, errors)
+        if discover
+          response.status = 202
+          response.body['evidence_capabilities'] = @evidence.descriptor
+          response.body['evidence_errors'] = indexed unless indexed.empty?
+        end
+        with_headers(response, response_headers)
       rescue JSON::ParserError
         with_headers(invalid_json_response, response_headers || {})
       rescue KeyError
@@ -130,27 +149,44 @@ module DebugBundle
         )
       end
 
-      def cors_headers(origin)
+      def cors_headers(origin, requested = nil)
+        allow_evidence = requested.to_s.downcase.split(',').map(&:strip).include?('x-debugbundle-evidence')
         {
           'Access-Control-Allow-Origin' => origin,
           'Access-Control-Allow-Methods' => 'POST, OPTIONS',
-          'Access-Control-Allow-Headers' => 'content-type',
+          'Access-Control-Allow-Headers' => allow_evidence ? 'content-type, x-debugbundle-evidence' : 'content-type',
           'Access-Control-Max-Age' => '600',
-          'Vary' => 'Origin'
+          'Vary' => allow_evidence ? 'Origin, Access-Control-Request-Headers' : 'Origin'
         }
       end
 
-      def deliver(events)
+      def requests_evidence?(request, headers)
+        return true if headers['x-debugbundle-evidence'] == '1'
+
+        url = request[:url]
+        return false unless url.is_a?(String) && url.bytesize <= 4096
+
+        URI.decode_www_form(URI.parse(url).query || '').include?(%w[debugbundle_evidence 1])
+      rescue URI::InvalidURIError, ArgumentError
+        false
+      end
+
+      def deliver(events, discover:)
         service_name = @service || events.first.dig('service', 'name') || 'service'
 
         case @project_mode
         when :local_only
-          Transport::FileTransport.new(@local_events_dir).call(service_name: service_name, events: events)
+          result = Transport::FileTransport.new(@local_events_dir).call(service_name: service_name, events: events)
+          raise 'relay_write_failed' unless result.status_code == 202
         when :connected
-          Transport::FileTransport.new(@spool_dir).call(service_name: service_name, events: events) if @durable_write
-
-          result = Transport.coerce_result(@forward_transport.call(project_token: @project_token, events: events))
-          raise 'relay_forward_failed' unless result.status_code.between?(200, 299)
+          if @durable_write
+            spool = Transport::FileTransport.new(@spool_dir)
+            written = spool.call(service_name: service_name, events: events)
+            raise 'relay_write_failed' unless written.status_code == 202
+          end
+          success, complete = @forwarder.send(events, discover: discover)
+          spool.mark_delivered(written.written_file_path) if complete && spool && written.written_file_path
+          raise 'relay_forward_failed' unless success || @durable_write
         else
           raise ArgumentError, 'unsupported relay project mode'
         end
@@ -161,12 +197,16 @@ module DebugBundle
         batch = decoded.fetch('batch')
         raise KeyError unless batch.is_a?(Array)
 
-        batch.each_with_index.with_object([[], []]) do |(candidate, index), (accepted, errors)|
+        batch.each_with_index.with_object([[], [], []]) do |(candidate, index), (accepted, errors, indexed)|
           sanitized = sanitize_event(candidate)
+          if sanitized && sanitized['event_type'] != 'analytics_event'
+            sanitized = EvidenceWire.supported(sanitized, @evidence.features)
+          end
           if sanitized
             accepted << sanitized
           else
             errors << "batch[#{index}]: Invalid browser relay event payload."
+            indexed << { 'index' => index, 'reason' => 'invalid_event' }
           end
         end
       end
@@ -194,17 +234,41 @@ module DebugBundle
             'environment' => @environment || service['environment'].to_s
           },
           'correlation' => sanitize_correlation(correlation, event_type),
-          'payload' => payload,
-          'project_token' => @project_token
+          'payload' => payload
         }
-        return nil unless TelemetryPrivacy.safe_event_identity?(sanitized)
+        sanitized['project_token'] = @project_token if @project_token.is_a?(String) && !@project_token.empty?
+        sanitized['context'] = candidate['context'] if candidate['context'].is_a?(Hash)
+        return nil unless EvidenceWire.valid_optional?(sanitized)
 
-        fields = TelemetryPrivacy.protect({ 'service' => sanitized['service'], 'payload' => sanitized['payload'] })
-        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
+        new_contract = uses_evidence_contract?(sanitized)
+        return nil if new_contract && !BeforeSend.valid?(sanitized)
 
-        sanitized.merge('service' => fields['service'], 'payload' => fields['payload'])
+        protect_relay_event(sanitized, new_contract)
       rescue StandardError
         nil
+      end
+
+      def protect_relay_event(sanitized, new_contract)
+        return nil unless TelemetryPrivacy.safe_event_identity?(sanitized)
+
+        fields = TelemetryPrivacy.protect(sanitized.slice('service', 'payload', 'context'))
+        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
+
+        protected = sanitized.merge(fields)
+        if EvidenceWire.valid_optional?(protected) && (!new_contract || BeforeSend.valid?(protected))
+          return EventBatch.fit(protected)
+        end
+
+        reduced = EvidenceWire.without_optional(protected)
+        EventBatch.fit(reduced) if reduced && BeforeSend.valid?(reduced)
+      rescue StandardError
+        nil
+      end
+
+      def uses_evidence_contract?(event)
+        event['event_type'] == 'diagnostic_context' ||
+          %w[exception_evidence resource_observations execution].any? { |field| event['payload'].key?(field) } ||
+          !EvidenceWire.reference(event.dig('context', 'evidence_reference')).nil?
       end
 
       def sanitize_correlation(value, event_type)

@@ -11,10 +11,13 @@ module DebugBundle
       end
 
       def call(env)
+        limit = @handler.respond_to?(:max_body_bytes) ? @handler.max_body_bytes : Relay::DEFAULT_MAX_BODY_BYTES
+        limit = Relay::DEFAULT_MAX_BODY_BYTES unless limit.is_a?(Integer) && limit.positive?
         response = @handler.handle(
           method: env['REQUEST_METHOD'],
+          url: "#{env['PATH_INFO']}?#{env['QUERY_STRING']}",
           headers: relay_headers(env),
-          body: env.fetch('rack.input', StringIO.new).read,
+          body: env.fetch('rack.input', StringIO.new).read(limit + 1),
           ip_address: env['REMOTE_ADDR']
         )
 

@@ -10,6 +10,7 @@ module DebugBundle
       :capture_request_events,
       :capture_breadcrumbs,
       :capture_probe_events,
+      :capture_diagnostic_context,
       :immediate_client_error_statuses,
       :immediate_client_error_path_rules,
       keyword_init: true
@@ -72,6 +73,7 @@ module DebugBundle
         capture_request_events: 'failures_only',
         capture_breadcrumbs: 'local_only',
         capture_probe_events: 'buffer_only',
+        capture_diagnostic_context: false,
         immediate_client_error_statuses: [],
         immediate_client_error_path_rules: []
       )
@@ -84,6 +86,7 @@ module DebugBundle
         capture_request_events: 'failures_only',
         capture_breadcrumbs: 'exception_only',
         capture_probe_events: 'buffer_only',
+        capture_diagnostic_context: true,
         immediate_client_error_statuses: [],
         immediate_client_error_path_rules: []
       )
@@ -125,6 +128,8 @@ module DebugBundle
           payload['capture_request_events'] || payload[:capture_request_events] || 'failures_only',
         capture_breadcrumbs: payload['capture_breadcrumbs'] || payload[:capture_breadcrumbs] || 'exception_only',
         capture_probe_events: payload['capture_probe_events'] || payload[:capture_probe_events] || 'buffer_only',
+        capture_diagnostic_context: (payload['preset'] || payload[:preset]) != 'minimal' &&
+          payload['capture_diagnostic_context'] != false && payload[:capture_diagnostic_context] != false,
         immediate_client_error_statuses: Array(
           payload['immediate_client_error_statuses'] || payload[:immediate_client_error_statuses]
         ).grep(Integer),

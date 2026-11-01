@@ -36,7 +36,8 @@ module DebugBundle
         max_body_bytes: relay_option(options, :relay_max_body_bytes, Relay::DEFAULT_MAX_BODY_BYTES),
         rate_limit_per_minute: relay_rate_limit(options),
         rate_limit_store: relay_option(options, :relay_rate_limit_store, nil),
-        forward_transport: relay_option(options, :relay_forward_transport, nil)
+        forward_transport: relay_option(options, :relay_forward_transport, nil),
+        evidence_capabilities: relay_option(options, :relay_evidence_capabilities, nil)
       )
     end
 

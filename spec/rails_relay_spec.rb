@@ -5,6 +5,13 @@ require 'json'
 require 'stringio'
 
 RSpec.describe DebugBundle::Rails::RelayEndpoint do
+  it 'keeps the optional Rails loader usable when Rails is not installed' do
+    hide_const('Rails')
+    allow(TOPLEVEL_BINDING.receiver).to receive(:require).and_call_original
+    allow(TOPLEVEL_BINDING.receiver).to receive(:require).with('rails/railtie').and_raise(LoadError)
+    expect { load File.expand_path('../lib/debugbundle/rails.rb', __dir__) }.not_to raise_error
+  end
+
   let(:relay_options_class) do
     Struct.new(
       :project_mode,

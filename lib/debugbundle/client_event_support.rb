@@ -9,11 +9,12 @@ module DebugBundle
 
       def capture_enabled?
         ensure_current_process!
-        config.enabled? && config.configured?
+        !@closed && config.enabled? && config.configured?
       end
 
       def merge_context(context)
-        merged = @context.merge(stringify_hash(context || {}))
+        scoped = @operations.current&.fetch(:correlation) || {}
+        merged = @context.merge(scoped).merge(stringify_hash(context || {}))
         @redactor.redact_value(merged)
       end
 
@@ -46,7 +47,13 @@ module DebugBundle
         }
       end
 
-      def runtime_payload = Runtime.payload
+      def runtime_payload
+        snapshot = Runtime.payload
+        # Engine metadata belongs in the existing extensible runtime block;
+        # unknown top-level runtime keys are rejected by installed acceptors.
+        extras = snapshot.slice('engine', 'engine_version')
+        snapshot.except('engine', 'engine_version').merge('framework_extras' => extras)
+      end
 
       def exception_causes(error)
         causes = []
@@ -144,15 +151,7 @@ module DebugBundle
         { 'value' => '[REDACTED]' }
       end
 
-      def apply_before_send(event)
-        protected = protect_event(event)
-        return nil unless protected
-
-        prepared = BeforeSend.apply(protected, config.before_send)
-        prepared && protect_event(prepared)
-      end
-
-      def protect_event(event)
+      def protect_event_fields(event)
         return nil unless TelemetryPrivacy.safe_event_identity?(event, additional_fields: config.redact_fields)
 
         fields = TelemetryPrivacy.protect(

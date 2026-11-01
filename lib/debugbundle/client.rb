@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 require 'digest'
+require 'English'
 require 'json'
 require 'set'
 require 'time'
 
 require 'debugbundle/client_event_support'
+require 'debugbundle/client_exception_support'
+require 'debugbundle/client_evidence_support'
 require 'debugbundle/client_process_support'
 require 'debugbundle/client_queue_support'
 require 'debugbundle/config_worker'
@@ -91,6 +94,9 @@ module DebugBundle
     def initialize(transport: nil, time_provider: nil, random_provider: nil, config_fetcher: nil, **options)
       @owner_pid = Process.pid
       @config = Config.new(**options)
+      @closed = false
+      @retired = false
+      initialize_evidence
       @time_provider = time_provider || -> { Time.now.utc }
       @random_provider = random_provider || -> { rand }
       @redactor = Redaction::Redactor.new(
@@ -99,17 +105,7 @@ module DebugBundle
       @transport = transport || build_default_transport
       @config_fetcher = config_fetcher || build_default_config_fetcher(custom_transport: !transport.nil?)
       @context = {}
-      @buffer = []
-      @buffer_bytes = 0
-      @buffer_priority_counts = [0, 0, 0, 0]
-      @inflight_event_ids = Set.new
-      @inflight_priority_counts = [0, 0, 0, 0]
-      @event_sizes = {}
-      @pressure_drops = {}
-      @hook_bypass = Set.new
-      @finalized_events = {}
-      @buffer_mutex = Mutex.new
-      @flush_mutex = Mutex.new
+      initialize_buffer_ownership
       @probe_buffers = {}
       @suppression = Suppression::Tracker.new
       @last_event_at = nil
@@ -144,46 +140,6 @@ module DebugBundle
     def capture_exception(error, context: nil, handled: true)
       capture_exception_internal(error, context: context, handled: handled, run_before_send: true)
     end
-
-    def capture_exception_internal(error, context:, handled:, run_before_send:)
-      return unless capture_enabled?
-      return unless preflight_capacity?(3, 'exception')
-
-      request_remote_config_poll_if_due
-
-      merged_context = merge_context(context)
-      payload = {
-        'name' => safe_exception_name(error),
-        'message' => safe_exception_message(error),
-        'stack' => safe_exception_stack(error),
-        'handled' => handled,
-        'request' => request_payload(merged_context['request']),
-        'response' => response_payload(merged_context['response']),
-        'runtime' => runtime_payload
-      }
-
-      causes = exception_causes(error)
-
-      probe_data = probe_snapshot
-      payload['probe_data'] = probe_data unless probe_data.empty?
-
-      extra_context = merged_context.except('request', 'response', 'correlation')
-      extra_context['causes'] = causes unless causes.empty?
-
-      event = base_event('backend_exception', payload, extra_context)
-
-      event_payload = event.fetch('payload')
-      suppression_key = [
-        event['event_type'],
-        event_payload['name'],
-        event_payload['message'],
-        event_payload['stack']
-      ].join(':')
-      return unless @suppression.should_capture(suppression_key, now: monotonic_now)
-
-      enqueue_event(event, skip_before_send: !run_before_send)
-    end
-    private :capture_exception_internal
 
     def capture_error(error, context: nil, handled: true) = capture_exception(error, context: context, handled: handled)
 
@@ -363,6 +319,8 @@ module DebugBundle
       return false unless @config_fetcher
 
       response = @config_fetcher.call(@remote_config_etag)
+      return false if @closed
+
       status_code = response.fetch(:status_code, 500)
       if status_code == 304
         schedule_next_remote_config_poll
@@ -373,7 +331,9 @@ module DebugBundle
         return false
       end
 
-      snapshot = RemoteConfig.parse(response.fetch(:body, {}), config.probes_poll_interval)
+      body = response.fetch(:body, {})
+      snapshot = RemoteConfig.parse(body, config.probes_poll_interval)
+      @evidence.observe(body, required: true, valid: !snapshot.nil? && @evidence.valid_config?(body))
       unless snapshot
         schedule_next_remote_config_poll
         return false
@@ -403,8 +363,17 @@ module DebugBundle
 
     def close
       ensure_current_process!
+      @closed = true
+      @operations.clear
+      @evidence = EvidenceDelivery.new
       @delivery_worker&.close
       @config_worker&.close
+      @buffer_mutex.synchronize { discard_closed_buffer_locked }
+    end
+
+    def dispose
+      @retired = true
+      close
     end
 
     def flush_now
@@ -417,20 +386,12 @@ module DebugBundle
         return false if @transport.nil?
         return false if rate_limited?
 
-        # Replace consumed snapshot slots so dropped events do not remain owned
-        # by this batch while later callbacks run or transport waits.
-        prepared = candidates.map! do |event|
-          finalized = finalized_event_for(event)
-          if finalized.nil?
-            remove_buffered_events([event])
-            next
-          end
-          [event, finalized]
-        end.compact
+        prepared = prepare_wire_batch(candidates)
         return true if prepared.empty?
 
         batch = prepared.map(&:first)
         wire_events = prepared.map(&:last)
+        return true if @closed
 
         result = Transport.coerce_result(
           @transport.call(
@@ -442,7 +403,9 @@ module DebugBundle
 
         case result.status_code
         when 200..299
-          handle_successful_result(result, batch)
+          accepted = handle_successful_result(result, batch)
+          @delivery_worker&.wake if @retry_at.nil? && buffered_event_count.positive?
+          accepted
         when 429, 500..599
           @consecutive_failures += 1
           retry_after_seconds = bounded_retry_hint(result.retry_after_seconds)
@@ -468,22 +431,30 @@ module DebugBundle
     private :flush_now
 
     def finalized_event_for(event)
+      return nil if @closed
+
       event_id = event['event_id']
       cached, bypass = @buffer_mutex.synchronize do
         [@finalized_events[event_id], @hook_bypass.include?(event_id)]
       end
-      return cached if cached
+      finalized = cached || (bypass || !config.before_send ? event : apply_before_send(event))
+      return nil if finalized.nil? || @closed
 
-      finalized = bypass || !config.before_send ? event : apply_before_send(event)
-      return nil if finalized.nil?
+      finalized = filter_evidence(finalized)
+      return nil unless finalized
       return nil unless post_hook_event_allowed?(finalized)
+      return nil unless reconcile_diagnostic(cached || event, finalized)
 
-      cache_finalized_event(event, finalized)
+      retained = cache_finalized_event(event, finalized)
+      @buffer_mutex.synchronize { release_diagnostics_locked(event, finalized) } unless retained
+      retained
     end
     private :finalized_event_for
 
     def post_hook_event_allowed?(event)
       case event['event_type']
+      when 'diagnostic_context'
+        recovery_allowed? && event.dig('payload', 'kind') == 'recovery'
       when 'log_event'
         return false if @capture_policy.capture_logs == 'off'
 
@@ -523,6 +494,8 @@ module DebugBundle
 
     def handle_successful_result(result, batch)
       decision = Acknowledgement.decide(result.body, batch.length, required: @transport.is_a?(Transport::HttpTransport))
+      lost_evidence = !@closed && @evidence.observe(result.body, required: @transport.is_a?(Transport::HttpTransport),
+                                                                 valid: decision[:kind] == :acknowledged)
       return handle_protocol_failure(result.retry_after_seconds) if decision[:kind] == :protocol_failure
 
       if decision[:kind] == :legacy
@@ -533,6 +506,7 @@ module DebugBundle
 
       retryable_indices = decision.fetch(:retryable_indices)
       retryable_events = retryable_indices.map { |index| batch.fetch(index) }
+      retryable_events |= downgrade_evidence_errors(batch, decision, lost_evidence)
       remove_buffered_events(batch - retryable_events)
       @last_event_at = now if decision.fetch(:accepted).positive?
 

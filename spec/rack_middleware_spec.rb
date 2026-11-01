@@ -6,6 +6,39 @@ require 'json'
 require 'openssl'
 
 RSpec.describe DebugBundle::Rack::Middleware do
+  it 'owns request evidence and recovery correlation only for the active Rack call' do
+    events = []
+    transport = lambda do |request|
+      events.concat(request[:events])
+      DebugBundle::Transport::Result.new(status_code: 202)
+    end
+    proof = { 'version' => 1, 'features' => DebugBundle::EvidenceWire::FEATURES }
+    sdk = DebugBundle::Client.new(project_token: 'synthetic', transport: transport, batch_size: 1000,
+                                  evidence_capabilities: proof,
+                                  capture_recovery_observations: true)
+    failure = SecureRandom.uuid
+    app = lambda do |_env|
+      sdk.capture_exception(RuntimeError.new('inside'), context: { failure_ref: failure })
+      sdk.capture_recovery(failure_ref: failure, attempt_id: SecureRandom.uuid, state: 'recovery_observed')
+      [200, {}, ['ok']]
+    end
+    result = described_class.new(app, client: sdk).call(
+      'REQUEST_METHOD' => 'GET', 'PATH_INFO' => '/test', 'HTTP_X_DEBUGBUNDLE_TRACE_ID' => 'rack-trace'
+    )
+    expect(result).to eq([200, {}, ['ok']])
+    sdk.flush
+    expect(events.map { |event| event['event_type'] }).to eq(%w[backend_exception diagnostic_context])
+    expect(events.first['payload']['execution']['kind']).to eq('request')
+    expect(events.map { |event| event['correlation']['trace_id'] }).to eq(%w[rack-trace rack-trace])
+    expect(events.last['payload']['scope']).to eq(events.first['context']['evidence_reference']['scope'])
+    sdk.capture_exception(RuntimeError.new('outside'))
+    sdk.flush
+    expect(events.last['payload']).not_to have_key('execution')
+    expect(events.last['correlation']['trace_id']).to be_nil
+  ensure
+    sdk&.close
+  end
+
   let(:transport_events) { [] }
   let(:client) do
     transport = Class.new do

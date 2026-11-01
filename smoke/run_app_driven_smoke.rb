@@ -69,7 +69,8 @@ Dir.mktmpdir('debugbundle-ruby-smoke-') do |temp_dir|
     'GEM_PATH' => gem_home,
     'PATH' => "#{File.join(gem_home, 'bin')}:#{ENV.fetch('PATH')}",
     'DEBUGBUNDLE_EXPECTED_VERSION' => version,
-    'DEBUGBUNDLE_SCHEMA_PATH' => schema_path
+    'DEBUGBUNDLE_SCHEMA_PATH' => schema_path,
+    'DEBUGBUNDLE_WIRE_CORPUS' => File.join(REPO_ROOT, 'spec/fixtures/evidence-wire-cases.json')
   }
 
   run_command!(env, 'gem', 'install', '--no-document', 'rack', 'json_schemer')

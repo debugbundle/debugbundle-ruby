@@ -51,4 +51,21 @@ RSpec.describe DebugBundle::Transport::FileTransport do
 
     expect(result.status_code).to eq(500)
   end
+
+  it 'creates a secure delivery marker only for its own regular spool file' do
+    Dir.mktmpdir do |directory|
+      transport = described_class.new(directory)
+      written = transport.call(events: [{ 'event_type' => 'log_event' }])
+      path = written.written_file_path
+      expect(transport.mark_delivered(path)).to be(true)
+      expect(File.stat("#{path}.delivered").mode & 0o777).to eq(0o600)
+      expect(transport.mark_delivered(path)).to be(false)
+      link = File.join(directory, 'linked.events.json')
+      File.symlink(path, link)
+      expect(transport.mark_delivered(link)).to be(false)
+      expect(transport.mark_delivered(File.join(directory, 'missing.events.json'))).to be(false)
+      expect(transport.mark_delivered(File.join(File.dirname(directory), 'foreign.events.json'))).to be(false)
+      expect(File.read(path)).not_to be_empty
+    end
+  end
 end

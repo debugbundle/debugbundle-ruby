@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'uri'
+require 'debugbundle/framework_operation'
 
 module DebugBundle
   module Rack
@@ -13,30 +14,32 @@ module DebugBundle
       def call(env)
         request_context = build_request_context(env)
         started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @client.with_request_trigger(request_context.fetch(:request)) do
-          status, headers, body = @app.call(env)
+        FrameworkOperation.run(@client, kind: 'request', correlation: request_context.slice(:request_id, :trace_id)) do
+          @client.with_request_trigger(request_context.fetch(:request)) do
+            status, headers, body = @app.call(env)
+            duration_ms = elapsed_ms(started_at)
+
+            @client.capture_request(
+              request_context.fetch(:request),
+              { status_code: status, headers: headers.to_h },
+              context: request_context.merge(duration_ms: duration_ms, route_template: route_template(env))
+            )
+
+            [status, headers, body]
+          end
+        rescue StandardError => e
           duration_ms = elapsed_ms(started_at)
-
-          @client.capture_request(
-            request_context.fetch(:request),
-            { status_code: status, headers: headers.to_h },
-            context: request_context.merge(duration_ms: duration_ms, route_template: route_template(env))
+          @client.capture_exception(
+            e,
+            context: request_context.merge(
+              response: { status_code: 500, headers: {} },
+              duration_ms: duration_ms,
+              route_template: route_template(env)
+            ),
+            handled: false
           )
-
-          [status, headers, body]
+          raise
         end
-      rescue StandardError => e
-        duration_ms = elapsed_ms(started_at)
-        @client.capture_exception(
-          e,
-          context: request_context.merge(
-            response: { status_code: 500, headers: {} },
-            duration_ms: duration_ms,
-            route_template: route_template(env)
-          ),
-          handled: false
-        )
-        raise
       end
 
       private

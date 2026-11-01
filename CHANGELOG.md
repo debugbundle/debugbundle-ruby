@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Proof-gated, bounded exception cause/frame evidence derived from retained scalar snapshots; smaller fatal-hook limits preserve existing error text and grouping.
+- Fiber-local `with_operation_context` and explicit opt-in `capture_recovery`, with request/job scopes in Rack and Sidekiq and bounded diagnostic ownership.
+- Capability negotiation on existing HTTP/config requests, bounded streamed response bodies, canonical ACK proof and one legacy fallback for an original error after an acknowledged capability downgrade.
+- Permanent `dispose`; singleton reinitialisation disposes the superseded client. Process-local `close` releases queued work and retains in-flight accounting until completion; documented fresh-worker fork behaviour is preserved.
+
+### Fixed
+
+- Preserve engine metadata under the existing canonical `runtime.framework_extras` block and supply an honest header when an exception has no native stack.
+- Validate fresh references, graph structure, placement, Unicode/number byte limits, CSP timestamps and canonical hook identity/type replacements against a shared conformance corpus.
+- Validate complete canonical hook envelopes before and after privacy, including conditional frontend identity, without restricting schema-allowed identity/type changes.
+- Bound actual outgoing JSON request bytes, reduce optional evidence before losing an admissible primary, and withhold oversized valid hook replacements without restoring pre-hook content. Retain chunk-local acknowledgement ownership.
+- Preserve closed evidence through Rack/Rails relays, split after server metadata expansion and mark a durable spool delivered only after complete downstream acceptance.
+- Load the standard `English` error alias explicitly so native process-exit capture works in clean installed applications without a framework loading it first.
+
 ## [2.0.1] - 2026-09-26
 
 ### Fixed

@@ -80,12 +80,63 @@ check(client.buffered_event_count <= 1_000, 'queue_count_budget_exceeded')
 check(client.instance_variable_get(:@buffer_bytes) <= 8 * 1_024 * 1_024, 'queue_byte_budget_exceeded')
 check(client.instance_variable_get(:@pressure_drops).fetch('error').fetch(:count).positive?, 'full_queue_not_exercised')
 
+def evidence_error(index)
+  inner = ArgumentError.new("inner #{index}")
+  inner.set_backtrace(Array.new(24) { |line| "app/jobs/inner.rb:#{line + 1}:in `process'" })
+  raise RuntimeError.new("outer #{index}"), cause: inner
+rescue RuntimeError => e
+  e.set_backtrace(Array.new(24) { |line| "app/jobs/outer.rb:#{line + 1}:in `perform'" })
+  e
+end
+
+evidence_entered = Queue.new
+evidence_release = Queue.new
+evidence_client = DebugBundle::Client.new(
+  project_token: 'synthetic', batch_size: 1, flush_interval: 60,
+  evidence_capabilities: { version: 1, features: DebugBundle::EvidenceWire::FEATURES },
+  capture_recovery_observations: true,
+  transport: lambda { |_request|
+    evidence_entered << true
+    evidence_release.pop
+    DebugBundle::Transport::Result.new(status_code: 202)
+  }
+)
+at_exit do
+  evidence_release << true
+  evidence_client.close
+end
+evidence_client.capture_exception(evidence_error(-1))
+Timeout.timeout(3) { evidence_entered.pop }
+evidence_seconds = Timeout.timeout(10) do
+  elapsed_seconds do
+    evidence_client.with_operation_context(kind: :job, name: 'performance.fixture') do
+      200.times { |index| evidence_client.capture_exception(evidence_error(index)) }
+    end
+  end
+end
+check(evidence_seconds < 1.5, "enriched_200_budget_exceeded:#{evidence_seconds}")
+check(evidence_client.buffered_event_count == 201, 'enriched_primary_events_missing')
+check(evidence_client.instance_variable_get(:@buffer_bytes) <= 8 * 1_024 * 1_024, 'enriched_bytes_unbounded')
+recovery_seconds = Timeout.timeout(10) do
+  elapsed_seconds do
+    50.times do
+      fields = { failure_ref: SecureRandom.uuid, attempt_id: SecureRandom.uuid, state: 'attempt_completed',
+                 evidence_scope: { kind: :operation, operation_id: SecureRandom.uuid } }
+      20.times { evidence_client.capture_recovery(fields) }
+    end
+  end
+end
+check(recovery_seconds < 1.5, "recovery_1k_budget_exceeded:#{recovery_seconds}")
+check(evidence_client.instance_variable_get(:@diagnostics).accounted_bytes <= 65_536, 'recovery_bytes_unbounded')
+
 puts JSON.generate(
   ruby_version: RUBY_VERSION,
   filtered_10k_seconds: filtered_seconds.round(4),
   configured_privacy_1k_seconds: configured_seconds.round(4),
   accepted_1k_seconds: accepted_seconds.round(4),
   held_transport_concurrent_10k_seconds: concurrent_seconds.round(4),
+  enriched_200_seconds: evidence_seconds.round(4),
+  recovery_1k_seconds: recovery_seconds.round(4),
   retained_count: client.buffered_event_count,
   retained_bytes: client.instance_variable_get(:@buffer_bytes)
 )

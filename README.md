@@ -10,6 +10,114 @@ Version 2.0 changes capture and hook timing. Existing installed 1.5.x applicatio
 
 `make sdk-safety-perf` runs a Docker-backed host-safety budget with 10,000 filtered INFO calls, 1,000 accepted ERROR calls with and without custom privacy fields, and 10,000 concurrent ERROR calls against a full queue while transport is held. CI and the release workflow run this gate before publication. These bounded synthetic checks supplement, but do not replace, installed runtime and workload qualification.
 
+`make evidence-performance` compares the same exception/recovery calls with
+evidence disabled and enabled, including a full warning queue. It reports capture
+time, allocated Ruby objects and retained bytes, and verifies original-error
+priority and the existing queue/diagnostic ceilings. Setup and cleanup are excluded;
+the existing `sdk-safety-perf` timing limits remain unchanged.
+
+## Unreleased evidence candidate
+
+The working candidate adds structured exception evidence and explicit recovery;
+it is not a published release. Enrichment requires a valid capability descriptor
+from the destination on an existing config/ingestion response. No extra discovery
+request is made. Unknown paths keep ordinary exception capture. The optional
+`evidence_capabilities: { version: 1, features: [...] }` pin asserts that every
+receiver, relay, spool/local processor and reader on that path has been qualified;
+it does not upgrade any receiver. `capture_exception_evidence: false` disables
+the new exception fields independently.
+
+`capture_recovery_observations` defaults to `false`. With destination proof and
+the option enabled, report application-observed outcomes inside an operation:
+
+```ruby
+require "securerandom"
+
+client = DebugBundle::Client.new(
+  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  capture_recovery_observations: true
+)
+
+client.with_operation_context(kind: "job", name: "asset.prepare", limit_ms: 5000) do
+  begin
+    prepare_asset
+  rescue => error
+    failure_ref = SecureRandom.uuid
+    attempt_id = SecureRandom.uuid
+    client.capture_exception(error, context: { failure_ref: failure_ref })
+    client.capture_recovery(failure_ref: failure_ref, attempt_id: attempt_id, state: "attempt_started")
+    result = application_recovery
+    client.capture_recovery(failure_ref: failure_ref, attempt_id: attempt_id, state: "attempt_completed")
+    client.capture_recovery(
+      failure_ref: failure_ref, attempt_id: attempt_id,
+      state: result.usable? ? "recovery_observed" : "failure_persisted"
+    )
+  end
+end
+```
+
+The application owns recovery and its success check. `attempt_completed` and a
+successful HTTP status do not establish recovery. `attempt_failed` records a
+failed attempt. Observations need no subsequent exception and do not open or
+resolve incidents. Use fresh UUID-v4 failure, attempt and scope IDs. For reporting
+outside the active operation, provide the same explicit `evidence_scope` at
+failure capture and in each observation. Page scopes additionally require the
+same nonblank session correlation; the string `"0"` is valid. Recovery accepts a
+Hash or keyword fields; scope/context Hash keys may be strings or symbols.
+
+Operations retain only bounded kind/name/elapsed/known-limit and correlation
+metadata. They preserve the block's return value and exceptions. Rack/Rails
+request and Sidekiq job capture runs inside its owned scope; other Fibers/threads
+do not inherit it. Completed scopes and process resets revoke ownership. Graphs
+use retained scalar exception snapshots, with no additional custom rendering or
+source/local-variable inspection. Ruby's linear cause path has at most five
+nodes and 32 frames per node, within a combined 32 KiB evidence budget. Fatal
+hooks use at most two nodes, eight frames per node and 4 KiB of total new evidence;
+delivery remains best-effort at process exit. Original sanitised stacks remain.
+Engine metadata is preserved under `payload.runtime.framework_extras`.
+
+Diagnostic metadata and pending events share 64 KiB, at most 50 failure windows,
+five attempts and 20 observations per window, and a five-minute capture window.
+Policy `capture_diagnostic_context: false` and the minimal preset disable recovery.
+Canonical `before_send` replacements may change identity and event type; the SDK
+reapplies privacy, policy, path proof and bounded ownership. An acknowledged
+capability downgrade may retry an original exception once without optional
+evidence, using the same identity and no second hook invocation.
+
+Hook replacements pass the complete vendored canonical schema and its conditional
+frontend identity checks before and after mandatory privacy. Invalid replacements
+fall back to the protected original; explicit `nil` still drops an event. Existing
+queue-pressure aggregate `reason` and `level` fields remain supported.
+
+Outgoing requests stay within the receiver's 256 KiB body limit, counting actual
+escaped UTF-8 JSON. The sender keeps ordered byte-sized batches and schedules
+remaining work on its existing worker. Acknowledgement indices apply to each
+submitted chunk. Oversized optional evidence is removed first; a valid hook
+replacement that still cannot fit is withheld without restoring pre-hook content.
+Invalid or throwing hooks retain the established safe-original fallback. Flush remains a bounded,
+best-effort wait; queued tails can continue after it returns. Local file transport
+keeps its existing bounded ownership and file semantics; the HTTP body limit
+does not narrow admissible local captures.
+
+Native HTTP config/ACK replies request identity encoding and retain at most
+256 KiB before JSON parsing. Existing native connect/read timeouts remain five
+seconds; relay chunks and downgrade retries share one five-second monotonic budget,
+passed to native response reads and remaining connect/read timeouts. A body deadline
+is checked between streamed chunks. Native DNS/socket waits remain advisory. Explicit
+`flush` still waits at most five seconds. `close` stops this process's sender,
+discards queued work and retains active-send accounting until completion. A
+forked child follows the existing fresh-worker contract. `dispose` permanently
+retires a client across process generations; singleton `DebugBundle.init` disposes
+its superseded client. Reinstall explicitly configured logger/integration
+bindings for a replacement client. Independently constructed clients remain
+available for applications that intentionally own multiple projects.
+
+Rack and Rails browser relays preserve validated evidence and server-owned
+credentials. Downstream chunks account for server metadata expansion; a durable
+spool is marked delivered only when every chunk has a complete canonical
+acknowledgement. Legacy custom transport success remains compatible and cannot
+create a delivered marker. Final installed/runtime qualification is in progress.
+
 ## Automatic capture and application filtering
 
 `capture_logger(logger)` respects the logger level, Rails silence and disabled output. Lazy message blocks are evaluated by the native logger: zero times when suppressed and once when accepted. Native return values and application block exceptions are preserved. DebugBundle applies its own configured minimum capture level after the logger accepts a message.
@@ -374,3 +482,22 @@ Apache-2.0. See LICENSE.
 The built-in HTTP transport requires the canonical ingestion acknowledgement (`accepted`, `rejected`, and `errors`). Empty responses, unrelated JSON, malformed counts, or invalid rejection indices retain the full batch with backoff. Valid acknowledgements remove accepted and terminally rejected events and retry only the indexed retryable rejections; an all-rejected batch does not advance `lastEventAt`.
 
 File transports and explicitly supplied custom/legacy transports retain their documented bodyless success fallback. A custom transport that returns acknowledgement fields must return the complete canonical shape. Retry hints (delay seconds or HTTP dates) are bounded to five minutes and measured from response receipt, including partial/protocol acknowledgements and retryable server failures. Without a server hint, existing retry timing is preserved. Failures remain contained within the SDK's existing delivery path.
+
+## Probe checkpoint guidance
+
+Application instrumentation supplies probe labels and bounded data. Deploy a new
+checkpoint before activating it. Remote activation affects future matching calls
+when policy permits; it does not inject code or recover unretained measurements.
+Built-in runtime/error/device collectors keep their documented SDK settings.
+
+Use fixed labels and allowlisted technical states: `media.preview.checkpoint`
+(stage/input kind/attempt), `auth.session.checkpoint` (observed session presence
+and result), `job.dependency.checkpoint` (named dependency/attempt/result), or
+`cache.preview.checkpoint` (hit/miss/coarse age bucket). Omit customer identifiers,
+tokens/cookies, cache keys, URLs and raw payloads. HTTP 200 or attempt completion
+alone does not establish semantic recovery.
+
+Empty probe data means no matching retained observation for the selected sample
+window. It does not confirm activation delivery to every SDK or execution of a
+label. Check the deployed SDK/wrapper version, instrumentation, scope, expiry,
+policy, sampling and delivery receipts. See the [probe recipes](https://debugbundle.com/docs/probes#bounded-checkpoint-recipes).

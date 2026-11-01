@@ -17,7 +17,10 @@ if defined?(Rails::Railtie)
             project_mode: options.project_mode || :connected,
             local_events_dir: options.local_events_dir || DebugBundle::Config::DEFAULT_LOCAL_EVENTS_DIR,
             endpoint: options.endpoint || DebugBundle::Config::DEFAULT_ENDPOINT,
-            redact_fields: Array(options.redact_fields) + Array(app.config.filter_parameters)
+            redact_fields: Array(options.redact_fields) + Array(app.config.filter_parameters),
+            capture_exception_evidence: options.capture_exception_evidence != false,
+            capture_recovery_observations: options.capture_recovery_observations == true,
+            evidence_capabilities: options.evidence_capabilities
           )
 
           app.middleware.use(DebugBundle::Rack::Middleware, client: client)

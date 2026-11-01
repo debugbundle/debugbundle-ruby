@@ -18,7 +18,8 @@ RSpec.describe DebugBundle::Sidekiq::ServerMiddleware do
   end
 
   it 'captures job exceptions and preserves retries by re-raising' do
-    client = DebugBundle::Client.new(project_token: 'dbundle_proj_test', transport: transport)
+    client = DebugBundle::Client.new(project_token: 'dbundle_proj_test', transport: transport,
+                                     evidence_capabilities: { 'version' => 1, 'features' => ['exception_evidence_v1'] })
     middleware = described_class.new(client: client)
     job = {
       'class' => 'CheckoutWorker',
@@ -40,11 +41,14 @@ RSpec.describe DebugBundle::Sidekiq::ServerMiddleware do
 
     expect(event.fetch('event_type')).to eq('backend_exception')
     expect(event.fetch('correlation')).to include('trace_id' => 'trace-job-1')
+    expect(event.fetch('payload').fetch('execution')).to include('kind' => 'job')
     expect(event.fetch('context').fetch('job')).to include(
       'class' => 'CheckoutWorker',
       'queue' => 'critical',
       'jid' => 'jid-1',
       'retry_count' => 2
     )
+  ensure
+    client&.close
   end
 end

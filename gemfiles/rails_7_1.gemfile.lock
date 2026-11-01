@@ -1,7 +1,7 @@
 PATH
   remote: ..
   specs:
-    debugbundle (2.0.1)
+    debugbundle (2.1.0)
       base64 (~> 0.2)
       logger (~> 1.6)
 

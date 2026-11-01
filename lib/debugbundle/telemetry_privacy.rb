@@ -29,7 +29,11 @@ module DebugBundle
       end
 
       work = { nodes: 0, bytes: 0, seen: {}.compare_by_identity,
-               fields: (FIELDS + additional_fields).map { |field| canonical(field) },
+               fields: if additional_fields.empty?
+                         CANONICAL_FIELDS
+                       else
+                         CANONICAL_FIELDS + additional_fields.map { |field| canonical(field) }
+                       end,
                extra: additional_fields,
                assignment_pattern: assignment_pattern(additional_fields) }
       result = visit(value, work, 0, true)
@@ -53,6 +57,10 @@ module DebugBundle
     def canonical(value)
       value.downcase.gsub(/[^a-z0-9]/, '')
     end
+
+    # Mandatory terms are immutable policy. Reuse their normalised form while
+    # each projection still owns its counters, seen set and configured keys.
+    CANONICAL_FIELDS = FIELDS.map { |field| canonical(field).freeze }.freeze
 
     def assignment_pattern(additional_fields)
       return DEFAULT_ASSIGNMENT_PATTERN if additional_fields.empty?

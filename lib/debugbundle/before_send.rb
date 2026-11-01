@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'time'
+require 'debugbundle/evidence_wire'
+require 'debugbundle/canonical_event_schema'
 
 module DebugBundle
   module BeforeSend
@@ -12,10 +14,12 @@ module DebugBundle
       'frontend_exception' => %w[name message stack],
       'deploy_metadata' => %w[commit_sha version branch environment deployed_at],
       'error_suppressed' => %w[fingerprint suppressed_count window_seconds first_seen last_seen],
-      'probe_event' => %w[label data activation_id probe_label_pattern]
+      'probe_event' => %w[label data activation_id probe_label_pattern],
+      'diagnostic_context' => %w[version kind failure_ref scope]
     }.freeze
     ALLOWED_PAYLOAD_FIELDS = {
-      'backend_exception' => %w[name message stack handled request response runtime probe_data],
+      'backend_exception' => %w[name message stack handled request response runtime probe_data exception_evidence
+                                execution],
       'request_event' => %w[
         method path query headers body response_status duration_ms route_template
         response_headers response_body device
@@ -24,17 +28,20 @@ module DebugBundle
       'frontend_breadcrumb' => %w[breadcrumb_type route data device],
       'frontend_exception' => %w[
         name message stack route browser breadcrumbs device browser_event
-        rejection_reason dom_context probe_data
+        rejection_reason dom_context probe_data exception_evidence resource_observations
       ],
       'deploy_metadata' => %w[commit_sha version branch environment deployed_at],
       'error_suppressed' => %w[fingerprint suppressed_count window_seconds first_seen last_seen reason level device],
-      'probe_event' => %w[label data activation_id probe_label_pattern device]
+      'probe_event' => %w[label data activation_id probe_label_pattern device],
+      'diagnostic_context' => %w[version kind failure_ref scope attempt_id state operation status_code duration_ms
+                                 source_event_id observations]
     }.freeze
     ROOT_FIELDS = %w[
       schema_version event_id event_type project_token project_id sdk_name sdk_version
       service occurred_at correlation context payload
     ].freeze
-    UUID_PATTERN = /\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i
+    UUID_PATTERN = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
+    MOBILE_SDK_NAMES = %w[@debugbundle/sdk-android @debugbundle/sdk-swift @debugbundle/sdk-react-native].freeze
 
     module_function
 
@@ -44,35 +51,56 @@ module DebugBundle
       result = hook.call(Marshal.load(Marshal.dump(event)))
       return nil if result.nil?
 
-      valid?(result) ? result : event
+      checked = normalization_result(result)
+      return nil if checked.equal?(EvidenceValue::EXHAUSTED)
+
+      checked || event
     rescue StandardError
       event
     end
 
     def valid?(event)
-      return false unless event.is_a?(Hash)
-      return false unless (event.keys - ROOT_FIELDS).empty?
-      return false unless %w[schema_version event_id event_type occurred_at sdk_name sdk_version].all? do |field|
-        event[field].is_a?(String) && !event[field].empty?
-      end
-      return false unless UUID_PATTERN.match?(event['event_id'])
+      !normalized(event).nil?
+    end
 
-      Time.iso8601(event['occurred_at'])
-      service = event['service']
+    def normalized(event)
+      result = normalization_result(event)
+      EvidenceValue.type?(result, Hash) ? result : nil
+    end
+
+    def normalization_result(event)
+      return nil unless EvidenceValue.type?(event, Hash)
+      return nil if Hash.instance_method(:size).bind_call(event) > ROOT_FIELDS.length
+
+      # Local/queued events keep their established ceiling independently of
+      # the smaller evidence DTO and HTTP budgets enforced at those boundaries.
+      owned = EvidenceValue.copy_with_budget(event, symbol_keys: true, max_bytes: 8 * 1024 * 1024,
+                                                    max_string_bytes: 8 * 1024 * 1024)
+      return owned if owned.equal?(EvidenceValue::EXHAUSTED)
+      return nil unless EvidenceValue.type?(owned, Hash)
+      return nil unless CanonicalEventSchema.valid?(owned) && EvidenceWire.valid_optional?(owned)
+      return nil unless required_frontend_context?(owned)
+
+      owned
+    rescue StandardError
+      nil
+    end
+
+    # The canonical Zod contract refines this conditional outside its shape;
+    # the generated JSON Schema alone cannot establish frontend identity.
+    def required_frontend_context?(event)
+      return true unless event['event_type'] == 'frontend_exception'
+
       payload = event['payload']
-      fields = REQUIRED_PAYLOAD_FIELDS[event['event_type']]
-      allowed_fields = ALLOWED_PAYLOAD_FIELDS[event['event_type']]
-      service.is_a?(Hash) &&
-        service['name'].is_a?(String) && !service['name'].empty? &&
-        service['environment'].is_a?(String) && !service['environment'].empty? &&
-        payload.is_a?(Hash) &&
-        fields &&
-        allowed_fields &&
-        (payload.keys - allowed_fields).empty? &&
-        fields.all? { |field| payload.key?(field) } &&
-        valid_payload_shape?(event['event_type'], payload)
-    rescue ArgumentError
-      false
+      MOBILE_SDK_NAMES.include?(event['sdk_name']) ? payload['device'].is_a?(Hash) : payload.key?('browser')
+    end
+
+    # Existing shape helpers stay available to integrations. Full acceptance
+    # above uses the vendored canonical contract, including nested fields.
+    def valid_identity?(event)
+      %w[schema_version event_id event_type occurred_at sdk_name sdk_version].all? do |field|
+        event[field].is_a?(String) && !event[field].empty?
+      end && UUID_PATTERN.match?(event['event_id']) && EvidenceWire.timestamp(event['occurred_at'])
     end
 
     def valid_payload_shape?(event_type, payload)
@@ -93,6 +121,8 @@ module DebugBundle
         valid_error_suppressed?(payload)
       when 'probe_event'
         valid_probe_event?(payload)
+      when 'diagnostic_context'
+        EvidenceWire.diagnostic(payload)
       else
         false
       end
@@ -160,9 +190,7 @@ module DebugBundle
     end
 
     def timestamp?(value)
-      value.is_a?(String) && Time.iso8601(value)
-    rescue ArgumentError
-      false
+      EvidenceWire.timestamp(value)
     end
 
     def nullable_uuid?(value)

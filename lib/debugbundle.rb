@@ -22,7 +22,9 @@ require_relative 'debugbundle/rails' if defined?(Rails::Railtie)
 module DebugBundle
   class << self
     def init(**options)
-      self.client = Client.new(**options)
+      replacement = Client.new(**options)
+      @client.dispose if @client.is_a?(Client)
+      self.client = replacement
       client.capture_exceptions
       client
     end
@@ -39,6 +41,14 @@ module DebugBundle
 
     def capture_error(error, context: nil)
       client.capture_error(error, context: context)
+    end
+
+    def capture_recovery(observation = nil, context: nil, **options)
+      client.capture_recovery(observation, context: context, **options)
+    end
+
+    def with_operation_context(...)
+      client.with_operation_context(...)
     end
 
     def capture_log(message, level: :warning, context: nil)

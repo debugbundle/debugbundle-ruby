@@ -6,12 +6,13 @@ require 'securerandom'
 require 'uri'
 require 'time'
 require 'fileutils'
+require 'debugbundle/bounded_http_response'
 
 module DebugBundle
   module Transport
     RETRY_AFTER_CAP_SECONDS = 300
 
-    Result = Struct.new(:status_code, :retry_after_seconds, :body, keyword_init: true)
+    Result = Struct.new(:status_code, :retry_after_seconds, :body, :written_file_path, keyword_init: true)
 
     def self.sdk_config_endpoint(events_endpoint)
       uri = URI.parse(events_endpoint)
@@ -48,24 +49,35 @@ module DebugBundle
       end
 
       def call(request)
+        deadline = request.fetch(:deadline) { Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5 }
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return Result.new(status_code: 500) unless remaining.positive?
+
+        body = JSON.generate(events: request.fetch(:events))
+        return Result.new(status_code: 413) if body.bytesize > 262_144
+
         http = Net::HTTP.new(@uri.host, @uri.port)
         http.use_ssl = @uri.scheme == 'https'
-        http.open_timeout = 5
-        http.read_timeout = 5
+        http.open_timeout = remaining
+        http.read_timeout = remaining
 
-        response = http.post(
-          @uri.request_uri,
-          JSON.generate(events: request.fetch(:events)),
-          {
-            'Authorization' => "Bearer #{request.fetch(:project_token)}",
-            'Content-Type' => 'application/json'
-          }
-        )
+        response, raw = BoundedHttpResponse.read(deadline: deadline) do |consume|
+          http.post(
+            @uri.request_uri,
+            body,
+            {
+              'Authorization' => "Bearer #{request.fetch(:project_token)}",
+              'Content-Type' => 'application/json',
+              'Accept-Encoding' => 'identity',
+              'X-DebugBundle-Evidence' => '1'
+            }, &consume
+          )
+        end
 
         Result.new(
           status_code: response.code.to_i,
           retry_after_seconds: parse_retry_after(response['Retry-After']),
-          body: parse_body(response.body)
+          body: parse_body(raw)
         )
       rescue StandardError
         Result.new(status_code: 500)
@@ -108,15 +120,18 @@ module DebugBundle
         http.open_timeout = 5
         http.read_timeout = 5
 
-        request = Net::HTTP::Get.new(@uri.request_uri)
+        request = Net::HTTP::Get.new(@uri.request_uri, 'Accept-Encoding' => 'identity')
         request['Authorization'] = "Bearer #{@project_token}"
         request['Accept'] = 'application/json'
         request['X-DebugBundle-SDK'] = @sdk_name
         request['X-DebugBundle-SDK-Version'] = @sdk_version
         request['If-None-Match'] = etag if etag
+        request['X-DebugBundle-Evidence'] = '1'
 
-        response = http.request(request)
-        body = response.body.to_s.empty? ? {} : JSON.parse(response.body)
+        response, raw = BoundedHttpResponse.read do |consume|
+          http.request(request) { |reply| reply.read_body(&consume) }
+        end
+        body = raw.empty? ? {} : JSON.parse(raw)
         { status_code: response.code.to_i, etag: response['ETag'], body: body }
       rescue StandardError
         { status_code: 500, body: {} }
@@ -150,11 +165,22 @@ module DebugBundle
         File.rename(temp_path, final_path)
         File.chmod(FILE_MODE, final_path)
 
-        Result.new(status_code: 202)
+        Result.new(status_code: 202, written_file_path: final_path)
       rescue StandardError
         Result.new(status_code: 500)
       ensure
         File.delete(temp_path) if defined?(temp_path) && temp_path && File.exist?(temp_path)
+      end
+
+      def mark_delivered(path)
+        ensure_secure_directory!(@directory)
+        return false unless File.dirname(File.expand_path(path)) == @directory && path.end_with?('.events.json')
+        return false unless File.file?(path) && !File.symlink?(path)
+
+        write_secure_file("#{path}.delivered", '')
+        true
+      rescue StandardError
+        false
       end
 
       private

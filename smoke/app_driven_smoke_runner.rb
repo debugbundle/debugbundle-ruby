@@ -7,6 +7,7 @@ require 'rack/mock_request'
 require 'socket'
 require 'timeout'
 require 'debugbundle'
+require_relative 'evidence_smoke'
 
 PROJECT_TOKEN = 'dbundle_proj_smoke'
 BACKEND_TRACE_ID = 'trace-smoke-backend'
@@ -16,7 +17,7 @@ RELAY_REQUEST_ID = 'req-smoke-relay'
 BROWSER_SERVICE = 'checkout-web'
 BROWSER_ENVIRONMENT = 'production'
 
-RecordedRequest = Struct.new(:http_method, :path, :headers, :body, keyword_init: true)
+RecordedRequest = Struct.new(:http_method, :path, :headers, :body, :wire_bytes, keyword_init: true)
 
 class MockIngestionServer
   def initialize
@@ -76,7 +77,8 @@ class MockIngestionServer
         http_method: method,
         path: path,
         headers: headers,
-        body: parsed_body
+        body: parsed_body,
+        wire_bytes: raw_body.bytesize
       )
     end
 
@@ -96,7 +98,7 @@ class MockIngestionServer
 
   def response_for(method, path, parsed_body)
     if method == 'GET' && path == '/v1/sdk/config'
-      [200, {
+      config = {
         probes_enabled: true,
         remote_probes_enabled: false,
         active_probes: [],
@@ -108,11 +110,15 @@ class MockIngestionServer
           capture_breadcrumbs: 'exception_only',
           capture_probe_events: 'buffer_only'
         }
-      }]
+      }
+      config[:evidence_capabilities] = EvidenceSmoke::DESCRIPTOR if EvidenceSmoke.enabled?
+      [200, config]
     elsif method == 'POST' && path == '/v1/events'
       events = parsed_body['events']
       accepted = events.is_a?(Array) ? events.length : 0
-      [202, { accepted: accepted, rejected: 0, errors: [] }]
+      ack = { accepted: accepted, rejected: 0, errors: [] }
+      ack[:evidence_capabilities] = EvidenceSmoke::DESCRIPTOR if EvidenceSmoke.enabled?
+      [202, ack]
     else
       [404, { error: 'not_found' }]
     end
@@ -153,13 +159,22 @@ schemer = JSONSchemer.schema(JSON.parse(File.read(schema_path)))
 
 server = MockIngestionServer.new
 
-DebugBundle.init(
+options = {
   project_token: PROJECT_TOKEN,
   service: 'checkout-api',
   environment: 'production',
   endpoint: server.endpoint,
   log_level: :warning
-)
+}
+if EvidenceSmoke.enabled?
+  options.merge!(evidence_capabilities: EvidenceSmoke::DESCRIPTOR, capture_recovery_observations: true)
+end
+DebugBundle.init(**options)
+if EvidenceSmoke.enabled?
+  Timeout.timeout(5) do
+    sleep(0.01) until DebugBundle.client.instance_variable_get(:@capture_policy).preset == 'balanced'
+  end
+end
 
 backend_app = Rack::Builder.new do
   use DebugBundle::Rack::Middleware, client: DebugBundle.client
@@ -178,6 +193,7 @@ backend_app = Rack::Builder.new do
         correlation: correlation
       }
     )
+    EvidenceSmoke.capture(DebugBundle.client) if EvidenceSmoke.enabled?
     [503, { 'Content-Type' => 'application/json' }, [JSON.generate(ok: false, smoke: true)]]
   }
 end.to_app
@@ -233,13 +249,24 @@ begin
             user_id_hash: 'user-smoke'
           },
           payload: {
-            message: 'ruby relay smoke message'
+            name: 'Error', message: 'ruby relay smoke message', stack: 'Error: ruby relay smoke message',
+            browser: { name: 'fixture', version: '1' }
           }
         }
       ]
     )
   )
   assert!(relay_response.status == 202, "unexpected_relay_status: #{relay_response.status}")
+
+  if EvidenceSmoke.enabled?
+    response = request.post('/debugbundle/browser?debugbundle_evidence=1',
+                            'HTTP_HOST' => 'api.example.com', 'CONTENT_TYPE' => 'application/json',
+                            'HTTP_ORIGIN' => 'https://app.example.com',
+                            input: JSON.generate(batch: EvidenceSmoke.relay_events))
+    assert!(response.status == 202, 'installed_evidence_relay_failed')
+    assert!(JSON.parse(response.body)['evidence_capabilities'] == EvidenceSmoke::DESCRIPTOR,
+            'installed_evidence_relay_proof_missing')
+  end
 
   if Gem::Version.new(expected_version) >= Gem::Version.new('2.0.0.pre.0')
     reader, writer = IO.pipe
@@ -257,7 +284,9 @@ begin
     reader.close
   end
 
+  EvidenceSmoke.fatal(server.endpoint) if EvidenceSmoke.enabled?
   DebugBundle.flush
+  Timeout.timeout(5) { sleep(0.01) until DebugBundle.client.buffered_event_count.zero? }
 ensure
   Process.kill('KILL', fork_pid) if defined?(fork_pid) && fork_pid
   reader&.close if defined?(reader)
@@ -278,6 +307,22 @@ assert!(
 
 ingestion_requests = captured_requests.select { |entry| entry.http_method == 'POST' && entry.path == '/v1/events' }
 assert!(ingestion_requests.length >= 2, "expected_at_least_two_ingestion_requests_got_#{ingestion_requests.length}")
+assert!(ingestion_requests.all? { |entry| entry.wire_bytes <= 262_144 }, 'installed_ingestion_body_exceeds_receiver')
+if EvidenceSmoke.enabled?
+  events = ingestion_requests.flat_map { |entry| entry.body.fetch('events') }
+  EvidenceSmoke.verify(events)
+  fatal = events.find { |event| event.dig('payload', 'message') == 'installed native fatal' }
+  graph = fatal&.dig('payload', 'exception_evidence')
+  assert!(fatal&.dig('payload', 'handled') == false && graph, 'installed_native_fatal_missing')
+  assert!(graph['nodes'].length <= 2 && graph['nodes'].all? { |node| node['frames'].length <= 8 },
+          'installed_native_fatal_graph_over_budget')
+  assert!(JSON.generate('exception_evidence' => graph).bytesize <= 4096, 'installed_native_fatal_bytes_over_budget')
+  assert!(events.any? do |event|
+    event['sdk_name'] == '@debugbundle/sdk-browser' &&
+      event.dig('payload', 'exception_evidence')
+  end, 'installed_enriched_relay_event_missing')
+  EvidenceSmoke.verify_local
+end
 
 assert!(ingestion_requests.none? { |request| JSON.generate(request.body).include?('PACKED_SMOKE_SECRET') },
         'installed_sdk_leaked_privacy_canary')
