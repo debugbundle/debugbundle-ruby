@@ -28,7 +28,7 @@ module DebugBundle
         raise ArgumentError, 'unsafe_input'
       end
 
-      work = { nodes: 0, bytes: 0, seen: {}.compare_by_identity,
+      work = { nodes: 0, bytes: 0, seen: {}.compare_by_identity, key_policy: {}, safe_text: {},
                fields: if additional_fields.empty?
                          CANONICAL_FIELDS
                        else
@@ -80,6 +80,23 @@ module DebugBundle
       end
     end
 
+    def key_policy(name, work)
+      cached = work[:key_policy][name]
+      return cached if cached
+
+      policy = if scrub_text(name, work) != name
+                 :omit
+               elsif sensitive_key?(name, work[:fields])
+                 :redact
+               else
+                 :retain
+               end
+      # Stack frames repeat the same keys. Cache decisions only in this bounded
+      # projection; values, byte accounting and later policies remain independent.
+      work[:key_policy][name] = policy if work[:key_policy].size < 256
+      policy
+    end
+
     def visit(value, work, depth, structured)
       work[:nodes] += 1
       raise ArgumentError, 'budget_exceeded' if work[:nodes] > 4096
@@ -115,9 +132,10 @@ module DebugBundle
           next if name.bytesize > 128
 
           count_bytes(work, name)
-          next if scrub_text(name, work) != name
+          policy = key_policy(name, work)
+          next if policy == :omit
 
-          result[name] = sensitive_key?(name, work[:fields]) ? REDACTED : visit(nested, work, depth + 1, structured)
+          result[name] = policy == :redact ? REDACTED : visit(nested, work, depth + 1, structured)
         end
       end
     ensure
@@ -142,10 +160,22 @@ module DebugBundle
           # Malformed structured content with a credential label is withheld below.
         end
       end
-      result = scrub_text(value, work)
+      result = scrub_value_text(value, work)
       return REDACTED if result == value && value.start_with?('{', '[') &&
                          /(?:password|token|secret|authorization|cookie)["']?\s*[:=]/i.match?(value)
 
+      result
+    end
+
+    def scrub_value_text(value, work)
+      # Only short, unchanged scalar text is reusable. Structured containers and
+      # redacted values always take the full path; every return owns its string.
+      cacheable = value.bytesize <= 128 && !value.start_with?('{', '[')
+      cached = work[:safe_text][value] if cacheable
+      return cached.dup if cached
+
+      result = scrub_text(value, work)
+      work[:safe_text][value] = result.dup.freeze if cacheable && result == value && work[:safe_text].size < 256
       result
     end
 

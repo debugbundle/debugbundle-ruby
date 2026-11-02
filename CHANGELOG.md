@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reuse repeated field-name privacy decisions and short unchanged scalar text within one projection, each bounded to 256 entries. Preserve mandatory and configured redaction, independent values and all existing byte/node/performance limits while reducing enriched-exception capture overhead.
+
 ## [2.1.0] - 2026-11-01
 
 ### Added

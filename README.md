@@ -8,7 +8,9 @@ The source test matrix covers Ruby 3.1 through 4.0. Rails 7.x remains an install
 
 Version 2.0 changes capture and hook timing. Existing installed 1.5.x applications continue to use their pinned gem until upgraded. Review [the migration guide](MIGRATION-2.0.md) before upgrading.
 
-`make sdk-safety-perf` runs a Docker-backed host-safety budget with 10,000 filtered INFO calls, 1,000 accepted ERROR calls with and without custom privacy fields, and 10,000 concurrent ERROR calls against a full queue while transport is held. CI and the release workflow run this gate before publication. These bounded synthetic checks supplement, but do not replace, installed runtime and workload qualification.
+`make sdk-safety-perf` runs a Docker-backed host-safety budget with 10,000 filtered INFO calls, 1,000 accepted ERROR calls with and without custom privacy fields, and 10,000 concurrent ERROR calls against a full queue while transport is held. It also bounds 200 enriched exceptions and 1,000 recovery observations. CI and the release workflow run this gate before publication. These bounded synthetic checks supplement, but do not replace, installed runtime and workload qualification.
+
+Mandatory privacy checks reuse at most 256 field-name decisions and 256 unchanged scalar strings of at most 128 bytes within each projection. Returned values remain independently owned. Every value and repeated key still counts against the existing resource budgets; both caches are discarded before the next event or policy.
 
 `make evidence-performance` compares the same exception/recovery calls with
 evidence disabled and enabled, including a full warning queue. It reports capture
