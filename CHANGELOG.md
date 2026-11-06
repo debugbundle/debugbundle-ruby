@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased]
+
 ## [2.1.1] - 2026-11-06
 
 - Use protected logger metadata and native object identity without invoking application-defined exception equality methods.
