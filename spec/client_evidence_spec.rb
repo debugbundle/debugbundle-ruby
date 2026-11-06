@@ -49,6 +49,83 @@ RSpec.describe DebugBundle::Client do
 
   after { clients.each(&:close) }
 
+  it 'uses native object identity without invoking application equality overrides' do
+    client = sdk
+    error = raised_error
+    reads = 0
+    error.define_singleton_method(:equal?) do |_other|
+      reads += 1
+      raise 'host equality'
+    end
+    client.with_operation_context(kind: 'request') do
+      client.capture_exception(error)
+      client.capture_exception(error)
+    end
+    client.flush
+    expect(reads).to eq(0)
+    expect(calls.length).to eq(2)
+  end
+
+  [false, true].each do |drop_first|
+    it "retains repeated native records and a report after hook rejection (#{drop_first})" do
+      count = 0
+      hook = lambda do |event|
+        count += 1
+        count == 1 ? nil : event
+      end
+      client = sdk(before_send: drop_first ? hook : nil)
+      error = raised_error
+      client.with_operation_context(kind: 'request') do
+        client.capture_exception(error, context: { logger_name: 'synthetic' })
+        client.flush
+        client.capture_exception(error, context: drop_first ? {} : { logger_name: 'synthetic' })
+        client.flush
+      end
+      expect(calls.length).to eq(drop_first ? 1 : 2)
+    end
+  end
+
+  it 'preserves native logged exceptions and their causes as one exception event' do
+    require 'stringio'
+    client = sdk(evidence_capabilities: pin)
+    logger = Logger.new(StringIO.new)
+    client.capture_logger(logger)
+    logger.error(raised_error)
+    logger.error('ordinary error')
+    client.flush
+    expect(calls.map { |event| event['event_type'] }).to eq(%w[backend_exception log_event])
+    expect(calls.first['payload']['exception_evidence']['nodes'].map do |node|
+      node['message']
+    end).to include('outer', 'inner')
+  end
+
+  it 'retains the SemanticLogger native exception rather than its generic message' do
+    client = sdk(evidence_capabilities: pin)
+    record = Struct.new(:message, :level, :name, :exception, :payload, :tags)
+                   .new('operation failed', :error, 'synthetic', raised_error, {}, [])
+    DebugBundle::Logging::SemanticLoggerAppender.new(client: client).log(record)
+    client.flush
+    expect(calls.map { |event| event['event_type'] }).to eq(['backend_exception'])
+    expect(calls.first['context']['log_message']).to eq('operation failed')
+    expect(calls.first['payload']['exception_evidence']['nodes'].length).to eq(2)
+  end
+
+  it 'deduplicates logger and middleware identity within each owned request only' do
+    require 'stringio'
+    client = sdk
+    logger = Logger.new(StringIO.new)
+    client.capture_logger(logger)
+    error = raised_error
+    2.times do
+      client.with_operation_context(kind: 'request') do
+        logger.error(error)
+        client.capture_exception(error)
+      end
+    end
+    client.flush
+    expect(calls.length).to eq(2)
+  end
+
   it 'retains legacy exception fields until the entire destination supports enrichment' do
     [nil, pin].each do |proof|
       client = sdk(evidence_capabilities: proof)

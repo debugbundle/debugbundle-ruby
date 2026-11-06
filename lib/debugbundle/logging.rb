@@ -44,7 +44,7 @@ module DebugBundle
       was_capturing = Thread.current[RECURSION_GUARD_KEY]
       Thread.current[RECURSION_GUARD_KEY] = true
       client.capture_log(
-        message.to_s,
+        message.is_a?(Exception) ? message : message.to_s,
         level: LOGGER_LEVEL_NAMES.fetch(severity, :warning),
         context: { logger_name: progname }
       )
@@ -79,6 +79,7 @@ module DebugBundle
           level: log.level || :info,
           context: {
             logger_name: log.name,
+            exception: log.respond_to?(:exception) ? log.exception : nil,
             payload: log.payload,
             tags: log.tags
           }

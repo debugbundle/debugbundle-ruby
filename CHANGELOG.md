@@ -1,6 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.1] - 2026-11-06
+
+- Use protected logger metadata and native object identity without invoking application-defined exception equality methods.
+- Final audit: only admitted captures create identity receipts; repeated native records and rejected before_send attempts cannot hide later failures. Deferred hooks retain uncertain cross-call reports.
+
+- Preserve Exception/cause evidence from stdlib, ActiveSupport Logger and SemanticLogger error records. Keep log context and scoped native logger/framework identity without merging unrelated failures.
+- Existing event schemas remain compatible; complete exception inputs may create new future fingerprints. Consumer installations require an explicit upgrade.
 
 ### Fixed
 

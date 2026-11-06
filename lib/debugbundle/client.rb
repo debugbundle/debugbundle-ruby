@@ -149,6 +149,15 @@ module DebugBundle
       normalized_level = normalize_level(level || :warning)
       return unless level_enabled?(normalized_level)
 
+      error = message.is_a?(Exception) ? message : context.is_a?(Hash) && (context[:exception] || context['exception'])
+      if %i[error critical].include?(normalized_level) && error.is_a?(Exception)
+        fields = (context || {}).reject { |key, _value| %w[exception].include?(key.to_s) }
+        fields[:logger_name] ||= 'logger'
+        fields[:log_message] = message if message.is_a?(String)
+        capture_exception(error, context: fields)
+        return
+      end
+
       priority = LOG_LEVEL_RANKS.fetch(normalized_level) >= LOG_LEVEL_RANKS.fetch(:error) ? 2 : 0
       return unless preflight_capacity?(priority, normalized_level.to_s)
 

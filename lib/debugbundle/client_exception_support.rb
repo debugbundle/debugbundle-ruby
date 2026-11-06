@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'debugbundle/exception_identity'
+
 module DebugBundle
   class Client
     module ExceptionSupport
@@ -9,9 +11,15 @@ module DebugBundle
         return unless capture_enabled?
         return unless preflight_capacity?(3, 'exception')
 
+        merged_context = evidence_context(merge_context(context))
+        @exception_identity ||= ExceptionIdentity.new
+        logged = merged_context.key?('logger_name')
+        automatic = !run_before_send || logged
+        scope = config.before_send ? nil : @operations.scope
+        return unless @exception_identity.admit?(error, scope, automatic)
+
         request_remote_config_poll_if_due
 
-        merged_context = evidence_context(merge_context(context))
         payload = {
           'name' => safe_exception_name(error),
           'message' => safe_exception_message(error),
@@ -45,7 +53,9 @@ module DebugBundle
         return unless @suppression.should_capture(suppression_key, now: monotonic_now)
 
         event = enrich_exception(event, retained, causes, fatal: !run_before_send)
-        enqueue_event(event, skip_before_send: !run_before_send)
+        return unless enqueue_event(event, skip_before_send: !run_before_send)
+
+        @exception_identity.admit?(error, scope, automatic, accepted: true)
       end
     end
 

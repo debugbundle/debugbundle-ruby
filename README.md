@@ -1,5 +1,7 @@
 # debugbundle
 
+Patch 2.1.1 corrects native logger exception evidence and capture safety while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the correction.
+
 Ruby SDK for DebugBundle.
 
 Use this gem to capture Ruby backend exceptions, request metadata, structured logs, runtime context, probe data, and browser relay traffic. It supports a singleton facade plus instance clients for Rack, Rails, Sidekiq, and explicit Ruby instrumentation.
