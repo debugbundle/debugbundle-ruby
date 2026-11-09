@@ -201,7 +201,8 @@ module DebugBundle
       result = result.gsub(pem, REDACTED)
       result = result.gsub(/\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*:\s*[^\r\n]*/i, '\\1: [REDACTED]')
       result = result.gsub(%r{\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]{6,}}i, '\\1 [REDACTED]')
-      result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent)_[A-Za-z0-9_-]+\b/, REDACTED)
+      result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent|invite|org_invite|org_transfer)_[A-Za-z0-9_-]+\b/,
+                           REDACTED)
       result = result.gsub(work[:assignment_pattern], '\\1\\2[REDACTED]')
       result = result.gsub(/(?<![A-Za-z0-9_-])(?:[0-9][ -]?){12,18}[0-9](?![A-Za-z0-9_-])/) do |candidate|
         valid_card?(candidate) ? REDACTED : candidate
