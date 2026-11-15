@@ -1,6 +1,6 @@
 # debugbundle
 
-Patch 2.1.2 protects invitation and organisation-transfer credentials in captured text while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the protection.
+Patch 2.1.3 protects invitation and organisation-transfer credentials in captured text while preserving public APIs and event schemas. Upgrade the DebugBundle distribution to adopt the protection.
 
 Ruby SDK for DebugBundle.
 
@@ -14,11 +14,179 @@ Version 2.0 changes capture and hook timing. Existing installed 1.5.x applicatio
 
 Mandatory privacy checks reuse at most 256 field-name decisions and 256 unchanged scalar strings of at most 128 bytes within each projection. Returned values remain independently owned. Every value and repeated key still counts against the existing resource budgets; both caches are discarded before the next event or policy.
 
-`make evidence-performance` compares the same exception/recovery calls with
-evidence disabled and enabled, including a full warning queue. It reports capture
-time, allocated Ruby objects and retained bytes, and verifies original-error
-priority and the existing queue/diagnostic ceilings. Setup and cleanup are excluded;
-the existing `sdk-safety-perf` timing limits remain unchanged.
+## Installation
+
+```bash
+gem install debugbundle
+```
+
+Or add it to your Gemfile and run `bundle install`:
+
+```ruby
+gem "debugbundle"
+```
+
+## Initialize
+
+<a id="quick-start"></a>
+
+Initialize once at application startup with `DEBUGBUNDLE_PROJECT_TOKEN` set in the server environment. Initialization arms best-effort process exception capture. Add framework and logger adapters below.
+
+```ruby
+require "debugbundle"
+
+DebugBundle.init(
+  project_token: ENV["DEBUGBUNDLE_PROJECT_TOKEN"],
+  environment: "production",
+  service: "api"
+)
+```
+
+## Integrations
+
+Rails, Rack, Sidekiq, Ruby Logger, Semantic Logger and browser relay handlers are supported.
+
+### Capture setup details
+
+`DebugBundle.init(...)` arms best-effort process exception capture automatically through `at_exit` and thread exception hooks. These hooks wake the sender without waiting for delivery; shutdown exceptions can be lost if the process exits before the sender finishes. Automatic delivery runs on one background sender thread when the configured batch size or flush interval is reached. Remote configuration uses a separate bounded poller so a slow fetch cannot hold delivery. An explicit `flush` waits for the sender for at most five seconds and reports whether delivery completed. Call it during a controlled shutdown window when delivery is required. A forked child starts fresh workers on its first SDK use and drops inherited parent events, context, and probes while retaining the parent's capture restrictions until remote configuration refreshes.
+
+### Framework Integrations
+
+| Surface | Integration |
+| --- | --- |
+| Rack | `DebugBundle::Rack::Middleware` |
+| Rails | Railtie bootstrap, Rack middleware, and auto-mounted relay route |
+| Sidekiq | `DebugBundle::Sidekiq::ServerMiddleware` |
+| Ruby Logger | `DebugBundle.capture_logger(logger)` |
+| Semantic Logger | `DebugBundle.capture_semantic_logger` |
+| Browser relay | `DebugBundle::Relay::Handler` or `DebugBundle::Rack::RelayMiddleware` |
+
+### Browser Relay
+
+Ruby backends can receive browser events at `POST /debugbundle/browser` through the relay handler.
+
+Rails applications can let the Railtie append that route automatically, or override it with:
+
+- `config.debugbundle.relay_enabled = false` to disable automatic mounting
+- `config.debugbundle.relay_path = "/debugbundle/browser"` to change the mounted path
+- `config.debugbundle.relay_allowed_origins = ["https://app.example.com"]` to pin allowed origins
+- `config.debugbundle.relay_rate_limit_per_minute = 120` to adjust per-IP rate limiting
+- `config.debugbundle.relay_rate_limit_store = Rails.cache` to share rate limiting across processes
+- `config.debugbundle.relay_handler = custom_handler` to supply a custom relay handler
+
+Rack applications can mount the same handler explicitly:
+
+```ruby
+relay_handler = DebugBundle::Relay::Handler.new(
+  project_mode: :connected,
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
+  endpoint: "https://api.debugbundle.com/v1/events",
+  allowed_origins: ["https://app.example.com"]
+)
+
+use DebugBundle::Rack::RelayMiddleware, handler: relay_handler
+```
+
+Relay behavior:
+
+- same-origin is the safe default when you do not set explicit allowed origins
+- use explicit allowed origins when the frontend and backend live on different hosts
+- requests must use `Content-Type: application/json`
+- request bodies are capped at 256 KB
+- per-IP rate limiting defaults to 60 requests per minute
+- browser-supplied DebugBundle credentials are stripped before delivery, preserving credential isolation
+- browser `service`, `environment`, and correlation fields are preserved unless you explicitly override them in the relay handler
+- local-only mode writes validated browser events to `.debugbundle/local/events`
+- connected durable mode writes validated browser events to `.debugbundle/local/browser-relay-spool` before forwarding to the configured endpoint
+- set `relay_durable_write: false` when you intentionally want connected forwarding without the local spool write
+- to disable the relay entirely, leave the route unmounted or set `relay_enabled = false`
+- a missing token means connected forwarding cannot succeed; treat that as a server config error and leave the route disabled until the server-side token is fixed
+
+### Manual capture and logging
+
+```ruby
+require "logger"
+
+DebugBundle.capture_logger(Logger.new($stdout))
+
+begin
+  perform_checkout
+rescue => error
+  DebugBundle.capture_exception(error, context: { order_id: 123 })
+end
+
+DebugBundle.capture_message("worker started", level: :info)
+DebugBundle.flush
+```
+
+## First-event verification
+
+Use an explicit setup event in a development or staging application, then confirm the matching service and environment in a received event or incident. Initialization, a healthy status and an empty queue are not delivery receipts. Keep the application running long enough for delivery; use bounded flushing only in tests or controlled teardown, never in a request handler.
+
+Use an explicit test message or exception during setup:
+
+```ruby
+require "debugbundle"
+
+DebugBundle.init(
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
+  service: "debugbundle-first-event",
+  environment: "staging"
+)
+
+DebugBundle.capture_message("debugbundle first-event verification", level: :error)
+DebugBundle.flush
+puts [DebugBundle.status, DebugBundle.last_event_at].inspect
+```
+
+Then confirm the event through your mock ingestion endpoint, a staging project, or the DebugBundle CLI verification flow.
+
+This repository also ships a clean-install app-driven smoke harness that validates the built gem and the published gem path:
+
+```sh
+make smoke
+make smoke-published VERSION=1.5.0
+```
+
+`make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields. For version 2.0, it also forks the installed client and verifies exactly one child event without replaying the parent's buffered event.
+
+For connected delivery, confirm the event in DebugBundle and inspect its incident with the CLI. For local-file delivery, run `debugbundle process` followed by `debugbundle inspect <incident-id>`. A local file or mock endpoint receipt proves only that destination; it does not prove cloud acceptance.
+
+## Configuration
+
+<a id="configuration-reference"></a>
+
+Configuration sources and precedence:
+
+1. Explicit arguments passed to `DebugBundle.init(...)`, `DebugBundle::Client.new(...)`, or `DebugBundle::Relay::Handler.new(...)`.
+2. Rails `config.debugbundle.*` values when the Railtie wires the default client or relay route.
+3. Environment variables only when your application chooses to pass them into those explicit Ruby calls. The gem does not auto-read arbitrary config env vars on its own.
+4. Remote probe directives and capture policy returned by `GET /v1/sdk/config` after a connected client initializes.
+
+Capture-policy fields are server-owned and must not be supplied in local SDK config. The Ruby SDK enforces the server response locally after initialization.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `project_token` | required for connected capture | Write-only DebugBundle project token used by server-side transport. |
+| `service` | `ruby-service` | Service name used in event envelopes. |
+| `environment` | `development` | Runtime environment. |
+| `endpoint` | `https://api.debugbundle.com/v1/events` | Connected ingestion endpoint. |
+| `enabled` | `true` | Disable all capture without removing instrumentation. |
+| `project_mode` | `connected` | `connected` or `local_only`. |
+| `local_events_dir` | `.debugbundle/local/events` | Local event file destination. |
+| `spool_dir` | `.debugbundle/local/browser-relay-spool` | Relay durable spool destination. |
+| `redact_fields` | `[]` | Additional sensitive field names merged with built-in redaction defaults. Rails `filter_parameters` are added automatically. |
+| `batch_size` | `25` | Wake the background sender when this many events are buffered. |
+| `flush_interval` | `5` | Flush interval in seconds. |
+| `sample_rate` | `1.0` | Fraction of events kept before transport. |
+| `log_level` | `warning` | Minimum captured log severity. |
+| `relay_enabled` | `true` | Enable relay handling when using the Rails helper surface. |
+| `relay_rate_limit_per_minute` | `60` | Per-IP rate limit for browser relay requests. |
+| `relay_durable_write` | `true` | Write relay batches to the local spool before connected forwarding. |
+| `max_probe_labels` | `50` | Max distinct probe labels kept in memory. |
+| `max_probe_entries_per_label` | `10` | Max entries retained per probe label. |
+| `probe_flush_on_error` | `true` | Attach probe buffers to captured exceptions. |
+| `probes_poll_interval` | `60` | Remote config poll interval in seconds. |
 
 ## Evidence in 2.1.0
 
@@ -37,7 +205,7 @@ the option enabled, report application-observed outcomes inside an operation:
 require "securerandom"
 
 client = DebugBundle::Client.new(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   capture_recovery_observations: true
 )
 
@@ -125,83 +293,6 @@ create a delivered marker. Installed/runtime qualification passed before publica
 
 `capture_logger(logger)` respects the logger level, Rails silence and disabled output. Lazy message blocks are evaluated by the native logger: zero times when suppressed and once when accepted. Native return values and application block exceptions are preserved. DebugBundle applies its own configured minimum capture level after the logger accepts a message.
 
-## Installation
-
-```ruby
-gem "debugbundle"
-```
-
-## Quick Start
-
-```ruby
-require "debugbundle"
-require "logger"
-
-DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
-  service: "checkout-api",
-  environment: ENV.fetch("APP_ENV", "production")
-)
-
-DebugBundle.capture_logger(Logger.new($stdout))
-
-begin
-  perform_checkout
-rescue => error
-  DebugBundle.capture_exception(error, context: { order_id: 123 })
-end
-
-DebugBundle.capture_message("worker started", level: :info)
-DebugBundle.flush
-```
-
-`DebugBundle.init(...)` arms best-effort process exception capture automatically through `at_exit` and thread exception hooks. These hooks wake the sender without waiting for delivery; shutdown exceptions can be lost if the process exits before the sender finishes. Automatic delivery runs on one background sender thread when the configured batch size or flush interval is reached. Remote configuration uses a separate bounded poller so a slow fetch cannot hold delivery. An explicit `flush` waits for the sender for at most five seconds and reports whether delivery completed. Call it during a controlled shutdown window when delivery is required. A forked child starts fresh workers on its first SDK use and drops inherited parent events, context, and probes while retaining the parent's capture restrictions until remote configuration refreshes.
-
-## Framework Integrations
-
-| Surface | Integration |
-| --- | --- |
-| Rack | `DebugBundle::Rack::Middleware` |
-| Rails | Railtie bootstrap, Rack middleware, and auto-mounted relay route |
-| Sidekiq | `DebugBundle::Sidekiq::ServerMiddleware` |
-| Ruby Logger | `DebugBundle.capture_logger(logger)` |
-| Semantic Logger | `DebugBundle.capture_semantic_logger` |
-| Browser relay | `DebugBundle::Relay::Handler` or `DebugBundle::Rack::RelayMiddleware` |
-
-## Configuration Reference
-
-Configuration sources and precedence:
-
-1. Explicit arguments passed to `DebugBundle.init(...)`, `DebugBundle::Client.new(...)`, or `DebugBundle::Relay::Handler.new(...)`.
-2. Rails `config.debugbundle.*` values when the Railtie wires the default client or relay route.
-3. Environment variables only when your application chooses to pass them into those explicit Ruby calls. The gem does not auto-read arbitrary config env vars on its own.
-4. Remote probe directives and capture policy returned by `GET /v1/sdk/config` after a connected client initializes.
-
-Capture-policy fields are server-owned and must not be supplied in local SDK config. The Ruby SDK enforces the server response locally after initialization.
-
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `project_token` | required for connected capture | Write-only DebugBundle project token used by server-side transport. |
-| `service` | `ruby-service` | Service name used in event envelopes. |
-| `environment` | `development` | Runtime environment. |
-| `endpoint` | `https://api.debugbundle.com/v1/events` | Connected ingestion endpoint. |
-| `enabled` | `true` | Disable all capture without removing instrumentation. |
-| `project_mode` | `connected` | `connected` or `local_only`. |
-| `local_events_dir` | `.debugbundle/local/events` | Local event file destination. |
-| `spool_dir` | `.debugbundle/local/browser-relay-spool` | Relay durable spool destination. |
-| `redact_fields` | `[]` | Additional sensitive field names merged with built-in redaction defaults. Rails `filter_parameters` are added automatically. |
-| `batch_size` | `25` | Wake the background sender when this many events are buffered. |
-| `flush_interval` | `5` | Flush interval in seconds. |
-| `sample_rate` | `1.0` | Fraction of events kept before transport. |
-| `log_level` | `warning` | Minimum captured log severity. |
-| `relay_enabled` | `true` | Enable relay handling when using the Rails helper surface. |
-| `relay_rate_limit_per_minute` | `60` | Per-IP rate limit for browser relay requests. |
-| `relay_durable_write` | `true` | Write relay batches to the local spool before connected forwarding. |
-| `max_probe_labels` | `50` | Max distinct probe labels kept in memory. |
-| `max_probe_entries_per_label` | `10` | Max entries retained per probe label. |
-| `probe_flush_on_error` | `true` | Attach probe buffers to captured exceptions. |
-| `probes_poll_interval` | `60` | Remote config poll interval in seconds. |
-
 ## Install Examples by Mode
 
 ### Connected mode
@@ -210,7 +301,7 @@ Capture-policy fields are server-owned and must not be supplied in local SDK con
 require "debugbundle"
 
 DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-api",
   environment: "production",
   endpoint: "https://api.debugbundle.com/v1/events"
@@ -223,7 +314,7 @@ DebugBundle.init(
 require "debugbundle"
 
 DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-api",
   environment: "development",
   project_mode: :local_only,
@@ -238,7 +329,7 @@ require "debugbundle"
 require "rack"
 
 client = DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-api",
   environment: "production"
 )
@@ -259,7 +350,7 @@ end
 require "debugbundle"
 
 DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-api",
   environment: Rails.env
 )
@@ -275,7 +366,7 @@ end
 require "debugbundle"
 
 DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-worker",
   environment: ENV.fetch("APP_ENV", "production")
 )
@@ -294,7 +385,7 @@ require "debugbundle"
 require "logger"
 
 DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
+  project_token: ENV.fetch("DEBUGBUNDLE_PROJECT_TOKEN"),
   service: "checkout-api"
 )
 
@@ -320,47 +411,6 @@ Post-V1 integrations remain out of scope here: Resque, Delayed Job, GoodJob, Sne
 - Pin one `debugbundle` version across your Ruby web app and worker repos when you want identical SDK behavior everywhere.
 - Keep Rack, Rails, and Sidekiq inside the supported lanes above.
 - Do not mix unsupported framework majors into examples or deployment templates.
-
-## Browser Relay
-
-Ruby backends can receive browser events at `POST /debugbundle/browser` through the relay handler.
-
-Rails applications can let the Railtie append that route automatically, or override it with:
-
-- `config.debugbundle.relay_enabled = false` to disable automatic mounting
-- `config.debugbundle.relay_path = "/debugbundle/browser"` to change the mounted path
-- `config.debugbundle.relay_allowed_origins = ["https://app.example.com"]` to pin allowed origins
-- `config.debugbundle.relay_rate_limit_per_minute = 120` to adjust per-IP rate limiting
-- `config.debugbundle.relay_rate_limit_store = Rails.cache` to share rate limiting across processes
-- `config.debugbundle.relay_handler = custom_handler` to supply a custom relay handler
-
-Rack applications can mount the same handler explicitly:
-
-```ruby
-relay_handler = DebugBundle::Relay::Handler.new(
-  project_mode: :connected,
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
-  endpoint: "https://api.debugbundle.com/v1/events",
-  allowed_origins: ["https://app.example.com"]
-)
-
-use DebugBundle::Rack::RelayMiddleware, handler: relay_handler
-```
-
-Relay behavior:
-
-- same-origin is the safe default when you do not set explicit allowed origins
-- use explicit allowed origins when the frontend and backend live on different hosts
-- requests must use `Content-Type: application/json`
-- request bodies are capped at 256 KB
-- per-IP rate limiting defaults to 60 requests per minute
-- browser-supplied DebugBundle credentials are stripped before delivery, preserving credential isolation
-- browser `service`, `environment`, and correlation fields are preserved unless you explicitly override them in the relay handler
-- local-only mode writes validated browser events to `.debugbundle/local/events`
-- connected durable mode writes validated browser events to `.debugbundle/local/browser-relay-spool` before forwarding to the configured endpoint
-- set `relay_durable_write: false` when you intentionally want connected forwarding without the local spool write
-- to disable the relay entirely, leave the route unmounted or set `relay_enabled = false`
-- a missing token means connected forwarding cannot succeed; treat that as a server config error and leave the route disabled until the server-side token is fixed
 
 ## Remote Probes
 
@@ -410,35 +460,6 @@ Status meanings:
 - `:disconnected` — the SDK is disabled or repeated transport failures exhausted the connection path
 
 The release rule here is fail-safe, not fail-open: connected mode with a missing token must never pretend capture is healthy.
-
-## First-Event Verification
-
-Use an explicit test message or exception during setup:
-
-```ruby
-require "debugbundle"
-
-DebugBundle.init(
-  project_token: ENV.fetch("DEBUGBUNDLE_TOKEN"),
-  service: "debugbundle-first-event",
-  environment: "staging"
-)
-
-DebugBundle.capture_message("debugbundle first-event verification", level: :error)
-DebugBundle.flush
-puts [DebugBundle.status, DebugBundle.last_event_at].inspect
-```
-
-Then confirm the event through your mock ingestion endpoint, a staging project, or the DebugBundle CLI verification flow.
-
-This repository also ships a clean-install app-driven smoke harness that validates the built gem and the published gem path:
-
-```sh
-make smoke
-make smoke-published VERSION=1.5.0
-```
-
-`make smoke` builds the gem, installs it into a fresh RubyGems home, drives a Rack request plus a browser relay batch through the public SDK surface, validates event envelope shape, and confirms the mock ingestion endpoint receives the expected service, environment, SDK metadata, and correlation fields. For version 2.0, it also forks the installed client and verifies exactly one child event without replaying the parent's buffered event.
 
 ## Examples
 
@@ -513,3 +534,11 @@ The source candidate also scrubs standalone `dbundle_invite_`,
 SDK-owned retention or transmission. See the [shared qualification record](https://github.com/debugbundle/debugbundle/blob/main/spec/business-credential-redaction.md).
 Published packages keep their released behaviour until the coordinated dependency
 and distribution checks are completed and a new version is published.
+
+## Maintainer performance checks
+
+`make evidence-performance` compares the same exception/recovery calls with
+evidence disabled and enabled, including a full warning queue. It reports capture
+time, allocated Ruby objects and retained bytes, and verifies original-error
+priority and the existing queue/diagnostic ceilings. Setup and cleanup are excluded;
+the existing `sdk-safety-perf` timing limits remain unchanged.
