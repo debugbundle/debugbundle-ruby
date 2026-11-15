@@ -44,7 +44,8 @@ RSpec.describe 'repository metadata' do
     readme = read_repository_file('README.md')
 
     [
-      '## Configuration Reference',
+      '## Configuration',
+      '<a id="configuration-reference"></a>',
       'Configuration sources and precedence:',
       'Capture-policy fields are server-owned',
       '## Install Examples by Mode',
@@ -53,7 +54,7 @@ RSpec.describe 'repository metadata' do
       '## Browser Relay',
       '## Service Naming',
       '## Safe Startup and Status',
-      '## First-Event Verification',
+      '## First-event verification',
       'make smoke',
       'same-origin',
       'allowed origins',
