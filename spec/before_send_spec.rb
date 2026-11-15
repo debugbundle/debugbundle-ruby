@@ -3,6 +3,39 @@
 require 'spec_helper'
 
 RSpec.describe DebugBundle::BeforeSend do
+  corpus = JSON.parse(File.read(File.join(__dir__, 'fixtures/before-send-budget.json')))
+  corpus.fetch('cases').each do |fixture|
+    it "preserves owner policy at the shared byte boundary: #{fixture['id']}" do
+      result = described_class.apply(corpus.fetch('original'), ->(_) { fixture.fetch('event') })
+      expect(result.dig('payload',
+                        'message')).to eq(fixture['outcome'] == 'fallback' ? 'owner removed' : 'owner replacement')
+      expect(described_class.valid?(result)).to be(true)
+      next if fixture['outcome'] == 'fallback'
+
+      expect(result.fetch('payload').key?('exception_evidence')).to eq(fixture['outcome'] == 'keep')
+      expect(result.dig('context', 'owner_field')).to eq('preserved')
+      expect(result.fetch('context')).to have_key('evidence_reference') if fixture['id'].end_with?('-legacy')
+      if fixture['id'].end_with?('-typed') && fixture['outcome'] == 'reduce'
+        expect(result.fetch('context')).not_to have_key('evidence_reference')
+      end
+    end
+  end
+
+  it 'reduces combined evidence without restoring owner removed content' do
+    corpus = JSON.parse(File.read(File.join(__dir__, 'fixtures/evidence-wire-cases.json')))
+    replacement = corpus.fetch('events').find { |item| item['id'] == 'combined_optional_bytes' }.fetch('event')
+    replacement['payload']['message'] = 'owner replacement'
+    result = described_class.apply(base_event, ->(_) { replacement })
+    expect(result.dig('payload', 'message')).to eq('owner replacement')
+    expect(described_class.valid?(result)).to be(true)
+    expect(result.fetch('payload')).not_to have_key('exception_evidence')
+    expect(replacement.fetch('payload')).to have_key('exception_evidence')
+    [nil, 'invalid', []].each do |context|
+      replacement['context'] = context
+      expect(described_class.apply(base_event, ->(_) { replacement })).to eq(base_event)
+    end
+  end
+
   let(:base_event) do
     {
       'schema_version' => '2026-03-01',

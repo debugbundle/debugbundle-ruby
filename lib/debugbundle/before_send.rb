@@ -51,7 +51,7 @@ module DebugBundle
       result = hook.call(Marshal.load(Marshal.dump(event)))
       return nil if result.nil?
 
-      checked = normalization_result(result)
+      checked = normalization_result(result, reduce_evidence: true)
       return nil if checked.equal?(EvidenceValue::EXHAUSTED)
 
       checked || event
@@ -68,7 +68,7 @@ module DebugBundle
       EvidenceValue.type?(result, Hash) ? result : nil
     end
 
-    def normalization_result(event)
+    def normalization_result(event, reduce_evidence: false)
       return nil unless EvidenceValue.type?(event, Hash)
       return nil if Hash.instance_method(:size).bind_call(event) > ROOT_FIELDS.length
 
@@ -78,6 +78,8 @@ module DebugBundle
                                                     max_string_bytes: 8 * 1024 * 1024)
       return owned if owned.equal?(EvidenceValue::EXHAUSTED)
       return nil unless EvidenceValue.type?(owned, Hash)
+
+      owned = EvidenceWire.fit_hook_evidence(owned) if reduce_evidence
       return nil unless CanonicalEventSchema.valid?(owned) && EvidenceWire.valid_optional?(owned)
       return nil unless required_frontend_context?(owned)
 

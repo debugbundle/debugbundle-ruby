@@ -4,7 +4,7 @@ module DebugBundle
   module EvidenceGraph
     module_function
 
-    def valid?(value)
+    def valid?(value, check_byte_budget: true)
       wire = EvidenceWire
       return false unless wire.closed(value, %w[version runtime root_id nodes truncated unavailable_reason])
       return false unless wire.integer(value['version'], 1, 1) && wire.integer(value['root_id'], 0, 7)
@@ -25,7 +25,7 @@ module DebugBundle
       end
       visited = {}
       visit(value['root_id'], adjacency, [], visited) && visited.length == nodes.length &&
-        EvidenceJson.bytes(value) <= 32_768
+        (!check_byte_budget || EvidenceJson.bytes(value) <= 32_768)
     end
 
     def valid_node?(node)

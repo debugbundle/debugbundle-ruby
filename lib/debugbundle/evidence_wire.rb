@@ -111,7 +111,7 @@ module DebugBundle
         (value['limit_ms'].nil? || number(value['limit_ms']))
     end
 
-    def valid_optional?(event)
+    def valid_optional?(event, check_byte_budget: true)
       return false unless EvidenceValue.type?(event, Hash)
 
       payload = Hash.instance_method(:fetch).bind_call(event, 'payload', nil)
@@ -127,7 +127,12 @@ module DebugBundle
         return false unless allowed_field?(type, field)
 
         owned = EvidenceValue.copy(Hash.instance_method(:fetch).bind_call(payload, field))
-        return false unless field == 'execution' ? execution(owned) : validator.valid?(owned)
+        valid = if field == 'exception_evidence'
+                  EvidenceGraph.valid?(owned, check_byte_budget: check_byte_budget)
+                else
+                  field == 'execution' ? execution(owned) : validator.valid?(owned)
+                end
+        return false unless valid
 
         additions[field] = owned
       end
@@ -141,7 +146,7 @@ module DebugBundle
                                                                     nil))
       end
       additions['evidence_reference'] = selected if selected
-      EvidenceJson.bytes(additions) <= 32_768
+      !check_byte_budget || EvidenceJson.bytes(additions) <= 32_768
     rescue StandardError
       false
     end
@@ -178,6 +183,29 @@ module DebugBundle
         result = result.merge('context' => context.except('evidence_reference'))
       end
       result
+    end
+
+    # Owned JSON only: optional byte exhaustion cannot restore pre-hook content.
+    def fit_hook_evidence(event)
+      return event unless %w[backend_exception frontend_exception].include?(event['event_type'])
+
+      payload = event['payload']
+      return event unless payload.is_a?(Hash)
+
+      additions = payload.slice('exception_evidence', 'execution', 'resource_observations')
+      return event if additions.empty?
+      return event if event.key?('context') && !event['context'].is_a?(Hash)
+
+      context = event['context'].is_a?(Hash) ? event['context'].dup : {}
+      selected = reference(context['evidence_reference'])
+      additions['evidence_reference'] = context['evidence_reference'] if selected
+      return event if EvidenceJson.bytes(additions) <= 32_768
+      return event unless valid_optional?(event, check_byte_budget: false)
+
+      context.delete('evidence_reference') if selected
+      additions.delete('evidence_reference')
+      context['evidence_limits'] = { 'version' => 1 }.merge(additions.transform_values { 'budget_exceeded' })
+      without_optional(event).merge('context' => context)
     end
 
     def without_optional(event)
