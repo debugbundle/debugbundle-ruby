@@ -544,7 +544,7 @@ time, allocated Ruby objects and retained bytes, and verifies original-error
 priority and the existing queue/diagnostic ceilings. Setup and cleanup are excluded;
 the existing `sdk-safety-perf` timing limits remain unchanged.
 
-### Hook size limits (unreleased correction)
+### Hook size limits
 
 A hook replacement whose optional exception evidence exceeds the combined 32 KiB
 UTF-8 JSON budget keeps its replacement message and other primary fields. The SDK
