@@ -175,7 +175,8 @@ Capture-policy fields are server-owned and must not be supplied in local SDK con
 | `project_mode` | `connected` | `connected` or `local_only`. |
 | `local_events_dir` | `.debugbundle/local/events` | Local event file destination. |
 | `spool_dir` | `.debugbundle/local/browser-relay-spool` | Relay durable spool destination. |
-| `redact_fields` | `[]` | Additional sensitive field names merged with built-in redaction defaults. Rails `filter_parameters` are added automatically. |
+| `redact_fields` | `[]` | Additional broad segment-matched sensitive field names merged with built-in redaction defaults. Rails `filter_parameters` are added automatically. |
+| `redact_exact_fields` | `[]` | Additional exact-match sensitive field names (ASCII case-insensitive whole-key, query-parameter, and non-identifier text assignment matching with punctuation significant). Shares a 128-key combined ceiling with `redact_fields`. |
 | `batch_size` | `25` | Wake the background sender when this many events are buffered. |
 | `flush_interval` | `5` | Flush interval in seconds. |
 | `sample_rate` | `1.0` | Fraction of events kept before transport. |

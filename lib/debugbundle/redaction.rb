@@ -43,12 +43,14 @@ module DebugBundle
     class Redactor
       def initialize(
         sensitive_fields: DEFAULT_SENSITIVE_FIELDS,
+        exact_fields: [],
         max_depth: DEFAULT_MAX_DEPTH,
         max_string_length: DEFAULT_MAX_STRING_LENGTH,
         max_array_length: DEFAULT_MAX_ARRAY_LENGTH,
         max_hash_keys: DEFAULT_MAX_HASH_KEYS
       )
         @sensitive_terms = sensitive_fields.map { |field| compile_sensitive_term(field) }
+        @exact_fields = compile_exact_fields(exact_fields)
         @max_depth = max_depth
         @max_string_length = max_string_length
         @max_array_length = max_array_length
@@ -112,10 +114,31 @@ module DebugBundle
       end
 
       def sensitive_key?(key)
+        return true if exact_sensitive_key?(key)
+
         segments, joined = normalize_key(key)
 
         @sensitive_terms.any? do |term|
           joined == term[:joined] || contains_contiguous_segments?(segments, term[:segments])
+        end
+      end
+
+      def exact_sensitive_key?(key)
+        return false if @exact_fields.empty?
+
+        text = key.to_s
+        text.valid_encoding? && @exact_fields.key?(text.strip.downcase(:ascii))
+      end
+
+      def compile_exact_fields(fields)
+        Array(fields).each_with_object({}) do |field, map|
+          next unless field.is_a?(String) || field.is_a?(Symbol)
+
+          text = field.to_s
+          next unless text.valid_encoding?
+
+          normalized = text.strip.downcase(:ascii)
+          map[normalized] = true unless normalized.empty?
         end
       end
 

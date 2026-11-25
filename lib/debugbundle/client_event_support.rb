@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'debugbundle/event_privacy'
 require 'debugbundle/safe_input'
 
 module DebugBundle
@@ -145,27 +146,22 @@ module DebugBundle
       end
 
       def normalize_probe_data(value)
-        redacted = TelemetryPrivacy.protect(@redactor.redact_value(value), additional_fields: config.redact_fields)
+        redacted = TelemetryPrivacy.protect(
+          @redactor.redact_value(value),
+          additional_fields: config.redact_fields,
+          exact_fields: config.redact_exact_fields
+        )
         redacted.is_a?(Hash) ? redacted : { 'value' => redacted }
       rescue StandardError
         { 'value' => '[REDACTED]' }
       end
 
       def protect_event_fields(event)
-        return nil unless TelemetryPrivacy.safe_event_identity?(event, additional_fields: config.redact_fields)
-
-        fields = TelemetryPrivacy.protect(
-          { 'service' => event['service'], 'payload' => event['payload'], 'context' => event['context'] },
-          additional_fields: config.redact_fields
+        EventPrivacy.protect(
+          event,
+          additional_fields: config.redact_fields,
+          exact_fields: config.redact_exact_fields
         )
-        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
-        return nil unless fields['service']['name'].is_a?(String) && fields['service']['environment'].is_a?(String)
-
-        event.merge('service' => fields['service'], 'payload' => fields['payload']).tap do |protected|
-          protected['context'] = fields['context'] if event.key?('context')
-        end
-      rescue StandardError
-        nil
       end
 
       def sampled_in?
@@ -184,7 +180,10 @@ module DebugBundle
       end
 
       def base_event(event_type, payload, context)
-        redacted_payload = @redactor.redact_value(payload)
+        redacted_payload = event_type == 'diagnostic_context' ? payload : @redactor.redact_value(payload)
+        if event_type == 'error_suppressed' && payload['reason'] == 'queue_pressure'
+          redacted_payload['reason'] = 'queue_pressure'
+        end
         preserve_redacted_probe_data!(event_type, payload, redacted_payload)
         event = {
           'schema_version' => SCHEMA_VERSION,

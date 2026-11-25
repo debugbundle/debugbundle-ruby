@@ -17,6 +17,75 @@ RSpec.describe DebugBundle::TelemetryPrivacy do
     fixture.fetch('cases').each do |entry|
       expect(described_class.protect(entry.fetch('input'))).to eq(entry.fetch('expected')), entry.fetch('id')
     end
+    fixture.fetch('exact_key_cases').each do |entry|
+      additional = entry.fetch('additional_keys', [])
+      exact = entry.fetch('exact_keys', [])
+      protected = described_class.protect(
+        entry.fetch('input'),
+        additional_fields: additional,
+        exact_fields: exact
+      )
+      expect(protected).to eq(entry.fetch('expected')), entry.fetch('id')
+      expect(
+        described_class.protect(protected, additional_fields: additional, exact_fields: exact)
+      ).to eq(protected), "#{entry.fetch('id')} idempotent"
+    end
+  end
+
+  it 'enforces combined custom key bounds and rejects blank, oversized, or regex keys' do
+    half_broad = Array.new(64) { |index| "broad_#{index}" }
+    half_exact = Array.new(64) { |index| "exact_#{index}" }
+    expect(
+      described_class.protect({ 'safe' => 1 }, additional_fields: half_broad, exact_fields: half_exact)
+    ).to eq('safe' => 1)
+
+    expect do
+      described_class.protect({ 'safe' => 1 }, additional_fields: half_broad, exact_fields: half_exact + ['exact_64'])
+    end.to raise_error(ArgumentError, 'unsafe_input')
+
+    expect do
+      described_class.protect({ 'safe' => 1 }, exact_fields: Array.new(129) { |index| "exact_#{index}" })
+    end.to raise_error(ArgumentError, 'unsafe_input')
+
+    ['', '   ', 'a' * 65, /tag/].each do |invalid_key|
+      expect do
+        described_class.protect({ 'safe' => 1 }, exact_fields: [invalid_key])
+      end.to raise_error(ArgumentError, 'unsafe_input')
+      expect do
+        described_class.protect({ 'safe' => 1 }, additional_fields: [invalid_key])
+      end.to raise_error(ArgumentError, 'unsafe_input')
+    end
+
+    expect(described_class.protect({ 'a' * 64 => 'SYNTHETIC' }, exact_fields: ['a' * 64])).to eq(
+      'a' * 64 => '[REDACTED]'
+    )
+    expect(
+      described_class.protect(
+        { 'foo.bar' => 'SYNTHETIC', 'fooXbar' => 'keep', 'msg' => 'foo.bar=SYNTHETIC fooXbar=keep' },
+        exact_fields: ['foo.bar']
+      )
+    ).to eq('foo.bar' => '[REDACTED]', 'fooXbar' => 'keep', 'msg' => 'foo.bar=[REDACTED] fooXbar=keep')
+  end
+
+  it 'checks event identity values with exact fields and fails closed on invalid field lists' do
+    expect(
+      described_class.safe_event_identity?(
+        { 'correlation' => { 'trace_id' => 'tag=SYNTHETIC_SECRET' } },
+        exact_fields: ['tag']
+      )
+    ).to be(false)
+    expect(
+      described_class.safe_event_identity?(
+        { 'correlation' => { 'trace_id' => 'tag_name=script' } },
+        exact_fields: ['tag']
+      )
+    ).to be(true)
+    expect(
+      described_class.safe_event_identity?(
+        { 'correlation' => { 'session_id' => 'session-123' } },
+        exact_fields: Array.new(129) { |index| "exact_#{index}" }
+      )
+    ).to be(false)
   end
 
   it 'keeps additional keys additive and does not modify caller data' do

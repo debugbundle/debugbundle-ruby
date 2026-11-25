@@ -39,4 +39,34 @@ RSpec.describe DebugBundle::Redaction::Redactor do
 
     expect(redacted).to include('patient_notes' => '[REDACTED]', 'safe' => 'ok')
   end
+
+  it 'redacts exact fields case-insensitively with punctuation significant while keeping mandatory keys broad' do
+    redactor = described_class.new(exact_fields: ['tag', 'x-tag', 'token', /ignored/])
+
+    redacted = redactor.redact_value(
+      'tag' => 'SYNTHETIC_SECRET',
+      'TAG' => 'SYNTHETIC_UPPER',
+      'tag_name' => 'script',
+      'tagName' => 'link',
+      'tag-name' => 'img',
+      'x-tag' => 'SYNTHETIC_HYPHEN',
+      'X-TAG' => 'SYNTHETIC_HYPHEN_UPPER',
+      'x_tag' => 'keep-underscore',
+      'user_token' => 'SYNTHETIC_TOKEN',
+      'ignored' => 'keep-non-string'
+    )
+
+    expect(redacted).to eq(
+      'tag' => '[REDACTED]',
+      'TAG' => '[REDACTED]',
+      'tag_name' => 'script',
+      'tagName' => 'link',
+      'tag-name' => 'img',
+      'x-tag' => '[REDACTED]',
+      'X-TAG' => '[REDACTED]',
+      'x_tag' => 'keep-underscore',
+      'user_token' => '[REDACTED]',
+      'ignored' => 'keep-non-string'
+    )
+  end
 end

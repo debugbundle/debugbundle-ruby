@@ -11,7 +11,8 @@ module DebugBundle
         return unless capture_enabled?
         return unless preflight_capacity?(3, 'exception')
 
-        merged_context = evidence_context(merge_context(context))
+        raw_context = stringify_hash(context || {})
+        merged_context = evidence_context(merge_context(context), raw_context: raw_context)
         @exception_identity ||= ExceptionIdentity.new
         logged = merged_context.key?('logger_name')
         automatic = !run_before_send || logged

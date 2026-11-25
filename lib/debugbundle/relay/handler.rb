@@ -2,6 +2,7 @@
 
 require 'json'
 require 'uri'
+require 'debugbundle/event_privacy'
 require 'debugbundle/relay/forwarder'
 
 module DebugBundle
@@ -38,7 +39,9 @@ module DebugBundle
         rate_limit_per_minute: DEFAULT_RATE_LIMIT_PER_MINUTE,
         rate_limit_store: nil,
         forward_transport: nil,
-        evidence_capabilities: nil
+        evidence_capabilities: nil,
+        redact_fields: DebugBundle::Config::DEFAULT_REDACT_FIELDS,
+        redact_exact_fields: DebugBundle::Config::DEFAULT_REDACT_EXACT_FIELDS
       )
         @project_mode = project_mode.to_sym
         @project_token = project_token
@@ -55,6 +58,8 @@ module DebugBundle
         @forward_transport = forward_transport || Transport::HttpTransport.new(@endpoint)
         @evidence = EvidenceDelivery.new(evidence_capabilities)
         @forwarder = Forwarder.new(@forward_transport, @project_token, @evidence)
+        @redact_fields = DebugBundle::Config.normalize_redact_fields(redact_fields)
+        @redact_exact_fields = DebugBundle::Config.normalize_redact_exact_fields(redact_exact_fields)
         @rate_limit_state = Hash.new { |hash, key| hash[key] = [] }
       end
 
@@ -249,18 +254,26 @@ module DebugBundle
       end
 
       def protect_relay_event(sanitized, new_contract)
-        return nil unless TelemetryPrivacy.safe_event_identity?(sanitized)
-
-        fields = TelemetryPrivacy.protect(sanitized.slice('service', 'payload', 'context'))
-        return nil unless fields['service'].is_a?(Hash) && fields['payload'].is_a?(Hash)
-
-        protected = sanitized.merge(fields)
-        if EvidenceWire.valid_optional?(protected) && (!new_contract || BeforeSend.valid?(protected))
+        protected = EventPrivacy.protect(
+          sanitized,
+          additional_fields: @redact_fields,
+          exact_fields: @redact_exact_fields
+        )
+        if protected && EvidenceWire.valid_optional?(protected) && (!new_contract || BeforeSend.valid?(protected))
           return EventBatch.fit(protected)
         end
 
-        reduced = EvidenceWire.without_optional(protected)
-        EventBatch.fit(reduced) if reduced && BeforeSend.valid?(reduced)
+        reduced = EvidenceWire.without_optional(sanitized)
+        return nil unless reduced
+
+        protected_reduced = EventPrivacy.protect(
+          reduced,
+          additional_fields: @redact_fields,
+          exact_fields: @redact_exact_fields
+        )
+        return nil unless protected_reduced && (!new_contract || BeforeSend.valid?(protected_reduced))
+
+        EventBatch.fit(protected_reduced)
       rescue StandardError
         nil
       end

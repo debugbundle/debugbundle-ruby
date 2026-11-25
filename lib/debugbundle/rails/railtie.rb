@@ -10,19 +10,7 @@ if defined?(Rails::Railtie)
           options = app.config.debugbundle
           next if options.respond_to?(:enabled) && options.enabled == false
 
-          client = DebugBundle.init(
-            project_token: options.project_token || ENV.fetch('DEBUGBUNDLE_TOKEN', nil),
-            service: options.service || app.class.module_parent_name.underscore.tr('_', '-'),
-            environment: options.environment || ::Rails.env,
-            project_mode: options.project_mode || :connected,
-            local_events_dir: options.local_events_dir || DebugBundle::Config::DEFAULT_LOCAL_EVENTS_DIR,
-            endpoint: options.endpoint || DebugBundle::Config::DEFAULT_ENDPOINT,
-            redact_fields: Array(options.redact_fields) + Array(app.config.filter_parameters),
-            capture_exception_evidence: options.capture_exception_evidence != false,
-            capture_recovery_observations: options.capture_recovery_observations == true,
-            evidence_capabilities: options.evidence_capabilities
-          )
-
+          client = DebugBundle.init(**DebugBundle::Rails.init_options(app, options))
           app.middleware.use(DebugBundle::Rack::Middleware, client: client)
           if DebugBundle::Rails.relay_route_enabled?(app)
             app.routes.append do
@@ -35,6 +23,22 @@ if defined?(Rails::Railtie)
           DebugBundle.capture_logger(::Rails.logger) if ::Rails.logger
           DebugBundle.capture_semantic_logger if defined?(::SemanticLogger)
         end
+      end
+
+      def self.init_options(app, options)
+        {
+          project_token: options.project_token || ENV.fetch('DEBUGBUNDLE_TOKEN', nil),
+          service: options.service || app.class.module_parent_name.underscore.tr('_', '-'),
+          environment: options.environment || ::Rails.env,
+          project_mode: options.project_mode || :connected,
+          local_events_dir: options.local_events_dir || DebugBundle::Config::DEFAULT_LOCAL_EVENTS_DIR,
+          endpoint: options.endpoint || DebugBundle::Config::DEFAULT_ENDPOINT,
+          redact_fields: Array(options.redact_fields) + Array(app.config.filter_parameters),
+          redact_exact_fields: options.redact_exact_fields,
+          capture_exception_evidence: options.capture_exception_evidence != false,
+          capture_recovery_observations: options.capture_recovery_observations == true,
+          evidence_capabilities: options.evidence_capabilities
+        }
       end
     end
   end

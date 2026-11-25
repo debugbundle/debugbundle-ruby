@@ -2,6 +2,8 @@
 
 require_relative 'debugbundle/redaction'
 require_relative 'debugbundle/telemetry_privacy'
+require_relative 'debugbundle/browser_event_privacy'
+require_relative 'debugbundle/event_privacy'
 require_relative 'debugbundle/acknowledgement'
 require_relative 'debugbundle/before_send'
 require_relative 'debugbundle/rack/middleware'

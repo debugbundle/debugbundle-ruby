@@ -18,6 +18,7 @@ module DebugBundle
     DEFAULT_PROBE_FLUSH_ON_ERROR = true
     DEFAULT_PROBES_POLL_INTERVAL = 60
     DEFAULT_REDACT_FIELDS = [].freeze
+    DEFAULT_REDACT_EXACT_FIELDS = [].freeze
 
     VALID_PROJECT_MODES = %i[connected local_only].freeze
     VALID_STATUSES = %i[healthy degraded disconnected].freeze
@@ -38,6 +39,7 @@ module DebugBundle
                 :relay_rate_limit_per_minute,
                 :relay_durable_write,
                 :redact_fields,
+                :redact_exact_fields,
                 :max_probe_labels,
                 :max_probe_entries_per_label,
                 :probe_flush_on_error,
@@ -46,6 +48,34 @@ module DebugBundle
                 :capture_exception_evidence,
                 :capture_recovery_observations,
                 :evidence_capabilities
+
+    def self.normalize_redact_fields(value)
+      Array(value).filter_map do |entry|
+        case entry
+        when String, Symbol
+          entry.to_s
+        when Regexp
+          entry.source
+        end
+      end.freeze
+    end
+
+    def self.normalize_redact_exact_fields(value)
+      return DEFAULT_REDACT_EXACT_FIELDS if value.nil?
+
+      Array(value).filter_map do |entry|
+        case entry
+        when String
+          entry.dup.freeze
+        when Symbol
+          entry.to_s
+        when NilClass
+          nil
+        else
+          entry
+        end
+      end.freeze
+    end
 
     def initialize(
       project_token: nil,
@@ -64,6 +94,7 @@ module DebugBundle
       relay_rate_limit_per_minute: DEFAULT_RELAY_RATE_LIMIT_PER_MINUTE,
       relay_durable_write: true,
       redact_fields: DEFAULT_REDACT_FIELDS,
+      redact_exact_fields: DEFAULT_REDACT_EXACT_FIELDS,
       max_probe_labels: DEFAULT_MAX_PROBE_LABELS,
       max_probe_entries_per_label: DEFAULT_MAX_PROBE_ENTRIES_PER_LABEL,
       probe_flush_on_error: DEFAULT_PROBE_FLUSH_ON_ERROR,
@@ -91,7 +122,8 @@ module DebugBundle
         DEFAULT_RELAY_RATE_LIMIT_PER_MINUTE
       )
       @relay_durable_write = relay_durable_write
-      @redact_fields = normalize_redact_fields(redact_fields)
+      @redact_fields = self.class.normalize_redact_fields(redact_fields)
+      @redact_exact_fields = self.class.normalize_redact_exact_fields(redact_exact_fields)
       @max_probe_labels = normalize_positive_integer(max_probe_labels, DEFAULT_MAX_PROBE_LABELS)
       @max_probe_entries_per_label = normalize_positive_integer(
         max_probe_entries_per_label,
@@ -144,17 +176,6 @@ module DebugBundle
       number.clamp(0.0, 1.0)
     rescue ArgumentError, TypeError
       DEFAULT_SAMPLE_RATE
-    end
-
-    def normalize_redact_fields(value)
-      Array(value).filter_map do |entry|
-        case entry
-        when String, Symbol
-          entry.to_s
-        when Regexp
-          entry.source
-        end
-      end.freeze
     end
   end
 end

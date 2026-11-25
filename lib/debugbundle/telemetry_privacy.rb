@@ -8,6 +8,10 @@ module DebugBundle
   module TelemetryPrivacy
     REDACTED = '[REDACTED]'
     MAX_BYTES = 262_144
+    MAX_CUSTOM_FIELDS = 128
+    MAX_CUSTOM_FIELD_LENGTH = 64
+    EMPTY_ARRAY = [].freeze
+    EMPTY_HASH = {}.freeze
     FIELDS = %w[
       password secret token api_key apikey access_token refresh_token private_key passwd
       card_number credit_card cvv cvc pin expiry phone bearer session_id otp
@@ -22,20 +26,24 @@ module DebugBundle
 
     module_function
 
-    def protect(value, additional_fields: [])
-      raise ArgumentError, 'unsafe_input' if additional_fields.length > 128
-      unless additional_fields.all? { |field| field.is_a?(String) && field.length.between?(1, 64) }
-        raise ArgumentError, 'unsafe_input'
-      end
+    def protect(value, additional_fields: EMPTY_ARRAY, exact_fields: EMPTY_ARRAY)
+      validate_custom_fields!(additional_fields, exact_fields)
 
+      trimmed_exact = exact_fields.empty? ? EMPTY_ARRAY : exact_fields.map(&:strip)
+      exact_map = if trimmed_exact.empty?
+                    EMPTY_HASH
+                  else
+                    trimmed_exact.to_h { |field| [field.downcase(:ascii), true] }
+                  end
       work = { nodes: 0, bytes: 0, seen: {}.compare_by_identity, key_policy: {}, safe_text: {},
                fields: if additional_fields.empty?
                          CANONICAL_FIELDS
                        else
                          CANONICAL_FIELDS + additional_fields.map { |field| canonical(field) }
                        end,
-               extra: additional_fields,
-               assignment_pattern: assignment_pattern(additional_fields) }
+               exact_fields: exact_map,
+               assignment_pattern: assignment_pattern(additional_fields),
+               exact_assignment_pattern: exact_assignment_pattern(trimmed_exact) }
       result = visit(value, work, 0, true)
       raise ArgumentError, 'budget_exceeded' if JSON.generate(result).bytesize > MAX_BYTES
 
@@ -44,13 +52,35 @@ module DebugBundle
       raise ArgumentError, 'unsafe_input'
     end
 
-    def safe_event_identity?(event, additional_fields: [])
-      correlation = event['correlation'] || {}
+    def safe_event_identity?(event, additional_fields: EMPTY_ARRAY, exact_fields: EMPTY_ARRAY)
+      validate_custom_fields!(additional_fields, exact_fields)
+      correlation = event['correlation'] || EMPTY_HASH
       return false unless correlation.is_a?(Hash) && correlation.size <= 8
 
       values = event.values_at('schema_version', 'sdk_name', 'sdk_version') + correlation.values
       values.all? do |value|
-        value.nil? || (value.is_a?(String) && protect(value, additional_fields: additional_fields) == value)
+        value.nil? || (value.is_a?(String) &&
+          protect(value, additional_fields: additional_fields, exact_fields: exact_fields) == value)
+      end
+    rescue ArgumentError
+      false
+    end
+
+    def validate_custom_fields!(additional_fields, exact_fields)
+      unless additional_fields.is_a?(Array) && exact_fields.is_a?(Array) &&
+             additional_fields.length + exact_fields.length <= MAX_CUSTOM_FIELDS
+        raise ArgumentError, 'unsafe_input'
+      end
+
+      return if valid_custom_field_list?(additional_fields) && valid_custom_field_list?(exact_fields)
+
+      raise ArgumentError, 'unsafe_input'
+    end
+
+    def valid_custom_field_list?(fields)
+      fields.all? do |field|
+        field.is_a?(String) && field.valid_encoding? &&
+          field.length.between?(1, MAX_CUSTOM_FIELD_LENGTH) && !field.strip.empty?
       end
     end
 
@@ -65,8 +95,18 @@ module DebugBundle
     def assignment_pattern(additional_fields)
       return DEFAULT_ASSIGNMENT_PATTERN if additional_fields.empty?
 
-      terms = (FIELDS + additional_fields).map { |field| Regexp.escape(field) }.join('|')
+      terms = (FIELDS + additional_fields.map(&:strip)).map { |field| Regexp.escape(field) }.join('|')
       Regexp.new("\\b(#{terms})\\b([\"']?\\s*[:=]\\s*)#{ASSIGNMENT_VALUE_PATTERN}", Regexp::IGNORECASE)
+    end
+
+    def exact_assignment_pattern(exact_fields)
+      return nil if exact_fields.empty?
+
+      terms = exact_fields.sort_by { |field| -field.length }.map { |field| Regexp.escape(field) }.join('|')
+      Regexp.new(
+        "(?<![A-Za-z0-9_-])(#{terms})(?![A-Za-z0-9_-])([\"']?\\s*[:=]\\s*)#{ASSIGNMENT_VALUE_PATTERN}",
+        Regexp::IGNORECASE
+      )
     end
 
     def sensitive_key?(key, fields)
@@ -80,13 +120,17 @@ module DebugBundle
       end
     end
 
+    def exact_sensitive_key?(key, exact_fields)
+      !exact_fields.empty? && exact_fields.key?(key.strip.downcase(:ascii))
+    end
+
     def key_policy(name, work)
       cached = work[:key_policy][name]
       return cached if cached
 
       policy = if scrub_text(name, work) != name
                  :omit
-               elsif sensitive_key?(name, work[:fields])
+               elsif sensitive_key?(name, work[:fields]) || exact_sensitive_key?(name, work[:exact_fields])
                  :redact
                else
                  :retain
@@ -204,6 +248,9 @@ module DebugBundle
       result = result.gsub(/\bdbundle_(?:proj|mem|probe|agent|invite|org_invite|org_transfer)_[A-Za-z0-9_-]+\b/,
                            REDACTED)
       result = result.gsub(work[:assignment_pattern], '\\1\\2[REDACTED]')
+      if (exact_pattern = work[:exact_assignment_pattern])
+        result = result.gsub(exact_pattern, '\\1\\2[REDACTED]')
+      end
       result = result.gsub(/(?<![A-Za-z0-9_-])(?:[0-9][ -]?){12,18}[0-9](?![A-Za-z0-9_-])/) do |candidate|
         valid_card?(candidate) ? REDACTED : candidate
       end
@@ -230,7 +277,8 @@ module DebugBundle
         uri.query = URI.encode_www_form(URI.decode_www_form(uri.query).filter_map do |key, value|
           next if key.bytesize > 128 || scrub_text(key, work, scan_urls: false) != key
 
-          unsafe = sensitive_key?(key, work[:fields]) || scrub_text(value, work, scan_urls: false) != value
+          unsafe = sensitive_key?(key, work[:fields]) || exact_sensitive_key?(key, work[:exact_fields]) ||
+                   scrub_text(value, work, scan_urls: false) != value
           [key, unsafe ? REDACTED : value]
         end)
       end

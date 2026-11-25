@@ -340,13 +340,140 @@ RSpec.describe DebugBundle::Client do
     expect(hooks).to eq(1)
   end
 
-  it 'preserves the primary error when mandatory privacy makes optional evidence invalid' do
+  it 'preserves validated exception evidence under broad redact_fields while redacting custom fields' do
     client = sdk(evidence_capabilities: pin, redact_fields: ['classification'])
-    client.capture_exception(raised_error)
+    client.capture_exception(raised_error, context: { classification: 'SYNTHETIC_CLASS' })
     client.flush
-    expect(calls.last['payload']['message']).to eq('outer')
+    event = calls.last
+    expect(event['payload']['message']).to eq('outer')
+    expect(event['payload']).to have_key('exception_evidence')
+    expect(event['payload']['exception_evidence']['nodes'][0]['frames'][0]['classification']).to eq('unknown')
+    expect(event['context']['classification']).to eq('[REDACTED]')
+    expect(schema.valid?(event)).to be(true), schema_errors(event)
+  end
+
+  it 'preserves the primary error when mandatory privacy makes optional evidence invalid' do
+    client = sdk(evidence_capabilities: pin, redact_fields: ['custom_tag'])
+    long_message = ('custom_tag=1 ' * 155).strip
+    client.capture_exception(RuntimeError.new(long_message))
+    client.flush
+    expect(calls.last['payload']['message']).to include('custom_tag=[REDACTED]')
     expect(calls.last['payload']).not_to have_key('exception_evidence')
-    expect(schema.valid?(calls.last)).to be(true)
+    expect(schema.valid?(calls.last)).to be(true), schema_errors(calls.last)
+  end
+
+  it 'redacts exact fields end-to-end while preserving compound siblings and re-sanitizing before_send' do
+    client = sdk(
+      redact_exact_fields: [:tag, 'x-tag'],
+      before_send: lambda do |event|
+        event['context']['hook_added'] = { 'tag' => 'SYNTHETIC_HOOK', 'tag_name' => 'script' }
+        event
+      end
+    )
+    client.set_context('payout', { tag: 'SYNTHETIC_CTX', tag_name: 'script', 'x-tag' => 'SYNTHETIC_X', x_tag: 'keep' })
+    client.capture_log(
+      'payout failed tag=SYNTHETIC_MSG tag_name=script x-tag=SYNTHETIC_X_MSG x-tag-name=keep',
+      level: :error,
+      context: {
+        tag: 'SYNTHETIC_LOG',
+        tag_name: 'script',
+        url: 'https://example.test/api?tag=SYNTHETIC_QUERY&tag_name=script&tag-name=img'
+      }
+    )
+    client.flush
+
+    event = calls.last
+    expect(event['payload']['message']).to eq(
+      'payout failed tag=[REDACTED] tag_name=script x-tag=[REDACTED] x-tag-name=keep'
+    )
+    expect(event['payload']['attributes']).to include(
+      'tag' => '[REDACTED]',
+      'tag_name' => 'script',
+      'url' => 'https://example.test/api?tag=%5BREDACTED%5D&tag_name=script&tag-name=img'
+    )
+    expect(event['context']['payout']).to eq(
+      'tag' => '[REDACTED]', 'tag_name' => 'script', 'x-tag' => '[REDACTED]', 'x_tag' => 'keep'
+    )
+    expect(event['context']['hook_added']).to eq('tag' => '[REDACTED]', 'tag_name' => 'script')
+    expect(JSON.generate(event)).not_to include('SYNTHETIC_')
+  end
+
+  it 'preserves closed protocol evidence and references under broad redact_fields while redacting app fields' do
+    failure_ref = SecureRandom.uuid
+    operation_id = SecureRandom.uuid
+    client = sdk(
+      evidence_capabilities: pin,
+      capture_recovery_observations: true,
+      redact_fields: %w[tag reference reason file]
+    )
+
+    client.with_operation_context(kind: 'job', name: 'payout.run tag=SYNTHETIC_EXEC', limit_ms: 5000) do
+      error = RuntimeError.new('boom reason=SYNTHETIC_ERR')
+      error.set_backtrace(['app/services/payout.rb:42:in `perform`'])
+      client.capture_exception(
+        error,
+        context: {
+          failure_ref: failure_ref,
+          evidence_scope: { kind: 'operation', operation_id: operation_id },
+          payout: {
+            tag: 'SYNTHETIC_TAG',
+            reference: 'SYNTHETIC_REF',
+            reason: 'SYNTHETIC_REASON',
+            file: 'SYNTHETIC_FILE'
+          }
+        }
+      )
+      client.capture_recovery(
+        failure_ref: failure_ref,
+        evidence_scope: { kind: 'operation', operation_id: operation_id },
+        attempt_id: SecureRandom.uuid,
+        state: 'recovery_observed',
+        operation: 'retry tag=SYNTHETIC_OP'
+      )
+    end
+    client.flush
+
+    exception_event = calls.find { |event| event['event_type'] == 'backend_exception' }
+    recovery_event = calls.find { |event| event['event_type'] == 'diagnostic_context' }
+
+    expect(exception_event['context']['evidence_reference']).to eq(
+      'version' => 1,
+      'failure_ref' => failure_ref,
+      'scope' => { 'kind' => 'operation', 'operation_id' => operation_id }
+    )
+    expect(exception_event['context']['payout']).to eq(
+      'tag' => '[REDACTED]',
+      'reference' => '[REDACTED]',
+      'reason' => '[REDACTED]',
+      'file' => '[REDACTED]'
+    )
+    expect(exception_event['payload']['exception_evidence']['unavailable_reason']).to be_nil
+    expect(exception_event['payload']['exception_evidence']['nodes'][0]['message']).to eq('boom reason=[REDACTED]')
+    expect(exception_event['payload']['exception_evidence']['nodes'][0]['frames'][0]['file']).to eq(
+      'app/services/payout.rb'
+    )
+    expect(exception_event['payload']['execution']).to include(
+      'kind' => 'job',
+      'name' => 'payout.run tag=[REDACTED]',
+      'limit_ms' => 5000
+    )
+    expect(recovery_event['payload']).to include(
+      'kind' => 'recovery',
+      'failure_ref' => failure_ref,
+      'state' => 'recovery_observed',
+      'operation' => 'retry tag=[REDACTED]'
+    )
+    expect(schema.valid?(exception_event)).to be(true), schema_errors(exception_event)
+    expect(schema.valid?(recovery_event)).to be(true)
+    expect(JSON.generate(calls)).not_to include('SYNTHETIC_')
+  end
+
+  it 'fails closed without raising when redact_exact_fields violates combined key bounds or uses a regex' do
+    [Array.new(129) { |index| "k_#{index}" }, [/tag/]].each do |bad_exact|
+      client = sdk(redact_exact_fields: bad_exact)
+      expect { client.capture_log('secret event', level: :error) }.not_to raise_error
+      expect(client.buffered_event_count).to eq(0)
+    end
   end
 
   it 'does not grant capabilities from invalid config while retaining legacy config parsing' do

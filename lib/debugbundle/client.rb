@@ -100,7 +100,8 @@ module DebugBundle
       @time_provider = time_provider || -> { Time.now.utc }
       @random_provider = random_provider || -> { rand }
       @redactor = Redaction::Redactor.new(
-        sensitive_fields: Redaction::DEFAULT_SENSITIVE_FIELDS + config.redact_fields
+        sensitive_fields: Redaction::DEFAULT_SENSITIVE_FIELDS + config.redact_fields,
+        exact_fields: config.redact_exact_fields
       )
       @transport = transport || build_default_transport
       @config_fetcher = config_fetcher || build_default_config_fetcher(custom_transport: !transport.nil?)
@@ -221,7 +222,9 @@ module DebugBundle
       return value unless safe_key
 
       safe = TelemetryPrivacy.protect(
-        { safe_key => @redactor.redact_value(value) }, additional_fields: config.redact_fields
+        { safe_key => @redactor.redact_value(value) },
+        additional_fields: config.redact_fields,
+        exact_fields: config.redact_exact_fields
       )
       @context[safe_key] = safe[safe_key] if safe.key?(safe_key)
       value
@@ -251,7 +254,11 @@ module DebugBundle
       resolved, raw_value = resolve_probe_value(data, block)
       return unless resolved
 
-      safe_label = TelemetryPrivacy.protect(label.to_s, additional_fields: config.redact_fields)
+      safe_label = TelemetryPrivacy.protect(
+        label.to_s,
+        additional_fields: config.redact_fields,
+        exact_fields: config.redact_exact_fields
+      )
       entry = {
         'label' => safe_label,
         'data' => normalize_probe_data(raw_value),

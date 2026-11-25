@@ -79,11 +79,21 @@ module DebugBundle
           @capture_policy.preset != 'minimal' && @capture_policy.capture_diagnostic_context != false
       end
 
-      def evidence_context(context)
+      def evidence_context(context, raw_context: nil)
         return context unless @evidence.supports?('recovery_v1') || @evidence.supports?('resource_observations_v1')
 
-        reference = EvidenceWire.capture_reference(context, @operations.scope)
+        reference = capture_evidence_reference(raw_context || context)
         reference ? context.except('failure_ref', 'evidence_scope').merge('evidence_reference' => reference) : context
+      end
+
+      def capture_evidence_reference(raw_context)
+        source = @context.slice('failure_ref', 'evidence_scope')
+                         .merge(raw_context.slice('failure_ref', 'evidence_scope'))
+        reference = EvidenceWire.capture_reference(EvidenceValue.options(source), @operations.scope)
+        return reference if reference
+
+        raw_ref = raw_context['evidence_reference']
+        raw_ref ? EvidenceWire.reference(EvidenceValue.options(raw_ref)) : nil
       end
 
       def enrich_exception(event, retained, causes, fatal:)

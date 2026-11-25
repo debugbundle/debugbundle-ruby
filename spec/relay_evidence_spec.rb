@@ -210,4 +210,118 @@ RSpec.describe DebugBundle::Relay::Handler do
     expect(response.status).to eq(204)
     expect(response.headers['Access-Control-Allow-Headers']).to include('x-debugbundle-evidence')
   end
+
+  it 'preserves closed browser protocol fields under broad redact_fields while redacting app fields' do
+    Dir.mktmpdir do |directory|
+      handler = described_class.new(
+        project_mode: :local_only,
+        project_token: 'server-owned',
+        local_events_dir: directory,
+        evidence_capabilities: pin,
+        redact_fields: %w[tag reference reason file]
+      )
+      ref = recovery['payload'].slice('version', 'failure_ref', 'scope')
+      browser_evt = Marshal.load(Marshal.dump(event))
+      browser_evt['payload']['browser_event'] = {
+        'kind' => 'resource_error',
+        'message' => 'Failed tag=SYNTHETIC_MSG',
+        'file_name' => 'https://cdn.example.test/app.js?token=SYNTHETIC_TOKEN&tag=SYNTHETIC_TAG',
+        'line_number' => 1,
+        'column_number' => 2,
+        'target' => {
+          'tag_name' => 'script',
+          'source_url' => 'https://cdn.example.test/widget.js?tag=SYNTHETIC_QUERY',
+          'attributes' => { 'rel' => 'preload', 'as' => 'script', 'async' => true }
+        },
+        'page' => {
+          'url' => 'https://app.example.test/checkout?tag=SYNTHETIC_PAGE',
+          'referrer' => nil,
+          'ready_state' => 'complete',
+          'visibility_state' => 'visible'
+        },
+        'opaque' => true
+      }
+      browser_evt['payload']['rejection_reason'] = {
+        'kind' => 'error',
+        'name' => 'ChunkLoadError',
+        'message' => 'Rejected reason=SYNTHETIC_REJ',
+        'preview' => 'Authorization: Bearer SYNTHETIC_BEARER'
+      }
+      browser_evt['payload']['resource_observations'] = {
+        'version' => 1,
+        'items' => [
+          {
+            'kind' => 'timing',
+            'observed_at' => '2026-11-24T00:00:00Z',
+            'source_url' => 'https://cdn.example.test/widget.js',
+            'availability' => 'observed',
+            'response_status' => 404,
+            'duration_ms' => 12,
+            'transfer_size_bytes' => 0
+          }
+        ]
+      }
+      browser_evt['context'] = {
+        'evidence_reference' => ref,
+        'evidence_limits' => { 'version' => 1, 'execution' => 'unsupported' },
+        'payout' => {
+          'tag' => 'SYNTHETIC_PTAG',
+          'reference' => 'SYNTHETIC_PREF',
+          'reason' => 'SYNTHETIC_PREASON',
+          'file' => 'SYNTHETIC_PFILE'
+        }
+      }
+
+      response = handler.handle(request([browser_evt]))
+      expect(response.status).to eq(202)
+
+      raw_stored = File.read(Dir.glob(File.join(directory, '*.events.json')).first)
+      expect(raw_stored).not_to include('SYNTHETIC_')
+      stored = JSON.parse(raw_stored).first
+
+      expect(stored.dig('payload', 'browser_event', 'target', 'tag_name')).to eq('script')
+      expect(stored.dig('payload', 'browser_event', 'target', 'source_url')).to eq(
+        'https://cdn.example.test/widget.js?tag=%5BREDACTED%5D'
+      )
+      expect(stored.dig('payload', 'browser_event', 'message')).to eq('Failed tag=[REDACTED]')
+      expect(stored.dig('payload', 'rejection_reason')).to eq(
+        'kind' => 'error',
+        'name' => 'ChunkLoadError',
+        'message' => 'Rejected reason=[REDACTED]',
+        'preview' => 'Authorization: [REDACTED]'
+      )
+      expect(stored.dig('payload', 'resource_observations', 'items', 0, 'source_url')).to eq(
+        'https://cdn.example.test/widget.js'
+      )
+      expect(stored.dig('payload', 'exception_evidence', 'unavailable_reason')).to be_nil
+      expect(stored.dig('context', 'evidence_reference')).to eq(ref)
+      expect(stored.dig('context', 'evidence_limits')).to eq('version' => 1, 'execution' => 'unsupported')
+      expect(stored.dig('context', 'payout')).to eq(
+        'tag' => '[REDACTED]',
+        'reference' => '[REDACTED]',
+        'reason' => '[REDACTED]',
+        'file' => '[REDACTED]'
+      )
+    end
+  end
+
+  it 'supports redact_exact_fields on browser relay without masking compound siblings' do
+    Dir.mktmpdir do |directory|
+      handler = described_class.new(
+        project_mode: :local_only,
+        project_token: 'server-owned',
+        local_events_dir: directory,
+        redact_exact_fields: ['tag']
+      )
+      relayed = Marshal.load(Marshal.dump(event))
+      relayed['context'] = { 'tag' => 'SYNTHETIC_TAG', 'tag_name' => 'script', 'payout_tag' => 'keep' }
+      relayed['payload']['message'] = 'failed tag=SYNTHETIC_MSG tag_name=script'
+
+      response = handler.handle(request([relayed], discover: false))
+      expect(response.status).to eq(202)
+      stored = JSON.parse(File.read(Dir.glob(File.join(directory, '*.events.json')).first)).first
+      expect(stored['context']).to eq('tag' => '[REDACTED]', 'tag_name' => 'script', 'payout_tag' => 'keep')
+      expect(stored.dig('payload', 'message')).to eq('failed tag=[REDACTED] tag_name=script')
+    end
+  end
 end

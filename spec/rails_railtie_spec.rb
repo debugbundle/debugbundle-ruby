@@ -49,8 +49,10 @@ RSpec.describe 'Rails Railtie integration' do
     expect(DebugBundle.client.config.capture_recovery_observations).to be(true)
     expect(DebugBundle.client.config.capture_exception_evidence).to be(false)
     expect(DebugBundle.client.config.evidence_capabilities['features']).to eq(['recovery_v1'])
+    expect(DebugBundle.client.config.redact_exact_fields).to eq(['tag'])
     handler = DebugBundle::Rails.build_relay_handler(app)
     expect(handler.instance_variable_get(:@evidence).features).to eq(['recovery_v1'])
+    expect(handler.instance_variable_get(:@redact_exact_fields)).to eq(['tag'])
   end
 
   def build_rails_app
@@ -81,6 +83,7 @@ RSpec.describe 'Rails Railtie integration' do
     debug_options.endpoint = 'http://127.0.0.1:1/v1/events'
     debug_options.capture_exception_evidence = false
     debug_options.capture_recovery_observations = true
+    debug_options.redact_exact_fields = [:tag]
     debug_options.evidence_capabilities = { 'version' => 1, 'features' => ['recovery_v1'] }
     debug_options.relay_evidence_capabilities = { 'version' => 1, 'features' => ['recovery_v1'] }
     debug_options.relay_durable_write = false
