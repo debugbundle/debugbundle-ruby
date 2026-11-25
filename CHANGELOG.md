@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-25
+
+- Add exact-key privacy to capture, Rails configuration, and relay handling.
+
 ## [2.1.4] - 2026-11-15
 
 - Preserve invalid-return fallback when optional evidence is both malformed and oversized; cover mixed evidence fields with the shared hook-budget corpus.
