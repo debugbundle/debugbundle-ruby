@@ -184,7 +184,10 @@ module DebugBundle
       return :invalid if owned.equal?(EvidenceValue::INVALID)
       return nil unless EvidenceGraph.valid?(owned, check_byte_budget: false)
 
-      nodes = owned['nodes'].map { |node| sanitize_evidence_node(node, opts) }
+      # The validated graph bounds this cache. Repeated frame paths and function
+      # names use the same privacy settings for the lifetime of this projection.
+      sanitized_text = {}
+      nodes = owned['nodes'].map { |node| sanitize_evidence_node(node, opts, sanitized_text) }
       return nil if nodes.any?(&:nil?)
 
       {
@@ -193,17 +196,18 @@ module DebugBundle
       }
     end
 
-    def sanitize_evidence_node(node, opts)
-      name = BrowserEventPrivacy.scrub_string(node['name'], opts)
-      message = BrowserEventPrivacy.scrub_string(node['message'], opts)
+    def sanitize_evidence_node(node, opts, sanitized_text)
+      name = scrub_evidence_string(node['name'], opts, sanitized_text)
+      message = scrub_evidence_string(node['message'], opts, sanitized_text)
       stack = if node['stack'].nil?
                 nil
               else
-                BrowserEventPrivacy.scrub_string(BrowserEventPrivacy.sanitize_browser_stack_urls(node['stack']), opts)
+                clean_stack = BrowserEventPrivacy.sanitize_browser_stack_urls(node['stack'])
+                scrub_evidence_string(clean_stack, opts, sanitized_text)
               end
       return nil if name.nil? || message.nil? || (!node['stack'].nil? && stack.nil?)
 
-      frames = node['frames'].map { |frame| sanitize_evidence_frame(frame, opts) }
+      frames = node['frames'].map { |frame| sanitize_evidence_frame(frame, opts, sanitized_text) }
       return nil if frames.any?(&:nil?)
 
       {
@@ -213,17 +217,22 @@ module DebugBundle
       }
     end
 
-    def sanitize_evidence_frame(frame, opts)
-      fn = frame['function'].nil? ? nil : BrowserEventPrivacy.scrub_string(frame['function'], opts)
+    def sanitize_evidence_frame(frame, opts, sanitized_text)
+      fn = frame['function'].nil? ? nil : scrub_evidence_string(frame['function'], opts, sanitized_text)
       file = if frame['file'].nil?
                nil
              else
-               BrowserEventPrivacy.scrub_string(BrowserEventPrivacy.sanitize_browser_stack_urls(frame['file']), opts)
+               clean_file = BrowserEventPrivacy.sanitize_browser_stack_urls(frame['file'])
+               scrub_evidence_string(clean_file, opts, sanitized_text)
              end
       return nil if (!frame['function'].nil? && fn.nil?) || (!frame['file'].nil? && file.nil?)
 
       { 'function' => fn, 'file' => file, 'line' => frame['line'],
         'column' => frame['column'], 'classification' => frame['classification'] }
+    end
+
+    def scrub_evidence_string(value, opts, sanitized_text)
+      sanitized_text.fetch(value) { sanitized_text[value] = BrowserEventPrivacy.scrub_string(value, opts) }&.dup
     end
 
     def sanitize_execution(raw, opts)

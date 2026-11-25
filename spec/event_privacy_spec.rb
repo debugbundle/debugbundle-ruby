@@ -105,6 +105,8 @@ RSpec.describe DebugBundle::EventPrivacy do
       'truncated' => false,
       'unavailable_reason' => nil
     }
+    frames = evidence['nodes'][0]['frames']
+    frames << frames.first.merge('line' => 20)
     event = frontend_event(
       exception_evidence: evidence,
       context: {
@@ -121,6 +123,8 @@ RSpec.describe DebugBundle::EventPrivacy do
     expect(node['stack']).to eq("ChunkLoadError\n    at load (https://cdn.example.test/app.js:12:4)")
     expect(node['frames'][0]['file']).to eq('https://cdn.example.test/app.js')
     expect(node['frames'][0]['classification']).to eq('application')
+    expect(node['frames'][1]).to eq(node['frames'][0].merge('line' => 20))
+    expect(node['frames'][1]['file']).not_to equal(node['frames'][0]['file'])
     expect(protected.dig('context', 'evidence_reference', 'failure_ref')).to eq(failure_ref)
     expect(protected.dig('context', 'evidence_limits')).to eq('version' => 1, 'execution' => 'unsupported')
     expect(protected.dig('context', 'payout')).to eq(

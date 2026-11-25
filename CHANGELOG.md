@@ -2,9 +2,10 @@
 
 ## [Unreleased]
 
-## [2.2.0] - 2026-11-25
+## [2.2.1] - 2026-11-25
 
 - Add exact-key privacy to capture, Rails configuration, and relay handling.
+- Reuse protected strings within each validated exception graph to keep enriched capture within the host-safety budget. The 2.2.0 candidate was held at the performance gate.
 
 ## [2.1.4] - 2026-11-15
 
